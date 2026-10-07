@@ -2,8 +2,9 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+# package-lock.json menjamin install deterministik di mesin manapun
+COPY package.json package-lock.json ./
+RUN npm ci
 
 COPY . .
 

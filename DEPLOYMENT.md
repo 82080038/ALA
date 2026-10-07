@@ -228,6 +228,48 @@ docker compose exec api python scripts/init_db.py
 
 > **NOTE:** Tidak ada script `ingest_laws.py` atau `seed_graph.py`. Semua data hukum ditemukan dan di-ingest secara **otonom** oleh modul ALCD saat sistem pertama kali dijalankan. ChromaDB dan Neo4j dimulai kosong dan dipopulasi otomatis.
 
+### 3.6b Setup di Mesin Lain (Reproducible Dev)
+
+Agar development di komputer lain menghasilkan aplikasi yang identik:
+
+```bash
+# 1. Clone
+git clone git@github.com:82080038/ALA.git && cd ALA
+
+# 2. Environment — .env TIDAK ikut repo (rahasia); buat dari template
+cp .env.example .env   # isi password sesuai mesin itu
+
+# 3. Dual-Ollama + model (host, perlu sudo)
+sudo ./scripts/setup_dual_ollama.sh
+ollama pull qwen2.5:3b-instruct && ollama pull qwen2.5-coder:3b
+
+# 4. Build & jalankan (lockfile menjamin versi identik)
+docker compose build
+docker build -t ala-sandbox:latest ./sandbox
+docker compose up -d
+docker compose exec api python scripts/init_db.py
+```
+
+Determinisme versi: `frontend/package-lock.json` (`npm ci`) +
+`backend/requirements.lock` (pip freeze dari image terverifikasi —
+`pip install -r requirements.lock` untuk pin penuh).
+
+**Membawa data yang sama persis** (opsional — ALCD dapat bootstrap ulang
+sendiri ±7 menit pada query pertama):
+
+```bash
+# Mesin lama
+./scripts/backup_volumes.sh              # → ala-data-backup-*.tar.gz
+# Salin file ke mesin baru (scp/usb)
+# Mesin baru — sebelum `docker compose up` pertama
+./scripts/restore_volumes.sh ala-data-backup-*.tar.gz
+docker compose up -d
+```
+
+Isi backup: skema+data Postgres (ontologi, `knowledge_registry`,
+kasus, audit), koleksi ChromaDB `indonesian_laws`, graph Neo4j
+`LegalArticle`/`CROSS_REFERENCES`.
+
 ### 3.7 Verifikasi
 
 ```bash
