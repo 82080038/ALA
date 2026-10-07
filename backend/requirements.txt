@@ -1,0 +1,45 @@
+# ── Core API (Phase 1) ─────────────────────────
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+
+# ── Database Drivers ──────────────────────────
+psycopg2-binary>=2.9.9
+psycopg[binary]>=3.1.0  # driver default SQLAlchemy>=2.1 untuk postgresql://
+sqlalchemy>=2.0.32
+alembic>=1.13.2
+chromadb>=0.5.0
+neo4j>=5.24.0
+
+# ── Auth ──────────────────────────────────────
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+
+# ── AI / Agents (Local Ollama) ────────────────
+# Semua dipin ke seri 0.3.x — langgraph 0.2.x terakhir dan
+# langchain-ollama 0.3.x sama-sama kompatibel dengan langchain-core 0.3.x.
+langgraph>=0.2.48,<0.3
+langchain-core>=0.3.0,<0.4
+langchain-community>=0.3.0,<0.4
+langchain-ollama>=0.3.0,<0.4
+
+# ── Crawling & Parsing ───────────────────────
+playwright>=1.47.0
+beautifulsoup4>=4.12.3
+lxml>=5.3.0
+
+# ── Embeddings (Phase 2+, heavy dep) ─────────
+# CATATAN: torch diinstall via Dockerfile dengan index cu124
+# (pip install torch --index-url https://download.pytorch.org/whl/cu124)
+# agar dukungan CUDA aktif. Jangan install torch dari PyPI biasa.
+sentence-transformers>=3.0.0
+
+# ── Dokumen & Sandbox ────────────────────────
+pypdf>=4.3.0          # parsing PDF dokumen hukum (ALCD)
+docker>=7.0.0         # runtime sandbox kode AI (docker-py)
+
+# ── Testing ──────────────────────────────────
+pytest>=8.3.0
