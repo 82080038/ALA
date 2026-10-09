@@ -104,6 +104,10 @@ class AiAuditLog(Base):
     evidence_sha256_before = Column(String(64), nullable=True)
     evidence_sha256_after = Column(String(64), nullable=True)
 
+    # Hash-chain tamper-evident — lihat app/audit.py
+    prev_hash = Column(String(64), nullable=True)
+    entry_hash = Column(String(64), nullable=True)
+
     metadata_ = Column("metadata", JSONB, default=dict)
 
     __table_args__ = (

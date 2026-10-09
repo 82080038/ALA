@@ -36,6 +36,8 @@ lxml>=5.3.0
 # (pip install torch --index-url https://download.pytorch.org/whl/cu124)
 # agar dukungan CUDA aktif. Jangan install torch dari PyPI biasa.
 sentence-transformers>=3.0.0
+# Korpus HuggingFace (ipfs_indonesia_laws + putusan MA) berformat parquet
+pyarrow>=15.0.0
 
 # ── Dokumen & Sandbox ────────────────────────
 pypdf>=4.3.0          # parsing PDF dokumen hukum (ALCD)

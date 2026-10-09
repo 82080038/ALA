@@ -120,8 +120,11 @@ Membangun basis pengetahuan hukum dari **NOL DATA**. Agen ini berjalan sebelum q
 | `alcd/ontology_generator.py` | Generate structured knowledge tree menggunakan LLM |
 | `alcd/source_discoverer.py` | Cari repositori hukum resmi via Google Search |
 | `alcd/document_parser.py` | Unduh, parse HTML/PDF, ekstrak konten terstruktur |
-| `alcd/autonomous_ingestor.py` | Chunk teks, generate embedding, simpan ke ChromaDB |
+| `alcd/autonomous_ingestor.py` | Chunk teks, generate embedding (model via `settings.embedding_model`), simpan ke ChromaDB |
 | `alcd/graph_builder.py` | Identifikasi cross-references, bangun relasi di Neo4j |
+| `alcd/doctrine.py` | 21 konsep ilmu hukum berjenjang — fondasi sebelum pasal |
+| `alcd/external_corpus.py` | Impor korpus terverifikasi: `spkt://` `lexisai://` `aph://` `hf://laws` `hf://putusan` |
+| `bm25.py` | Indeks BM25 lokal (stopword Indonesia) — lapis leksikal hybrid retrieval |
 | `evaluator.py` | Generate quiz, query RAG, skor jawaban, identifikasi gap |
 
 > Sub-modul `alcd/*` berada di bawah `backend/app/agents/`; `evaluator.py` sudah ada di `backend/app/agents/evaluator.py`.
@@ -136,25 +139,43 @@ Membangun basis pengetahuan hukum dari **NOL DATA**. Agen ini berjalan sebelum q
    a. Kirim core objective ke LLM
    b. LLM menghasilkan structured ontology tree (kategori, sub-kategori, prioritas)
    c. Simpan setiap node di tabel ontology_nodes
-3. FASE AKUISISI (untuk setiap node ontologi):
+3. FASE FONDASI — belajar ilmu hukum dulu sebelum membaca pasal:
+   a. seed_doctrine (alcd/doctrine.py): 21 konsep berjenjang —
+      pengantar ilmu hukum → sistem & sumber hukum → kodifikasi →
+      perundang-undangan → pidana materiil → hukum acara → delik
+      khusus → analisis perkara. LLM menulis gloss terstruktur;
+      dicatat kategori 'doktrin', verified=False (bukan sumber primer)
+   b. import_external_corpus (alcd/external_corpus.py): serap korpus
+      yang SUDAH di-OCR/diaudit — SPKT spkt.db (~49 UU 'berlaku' +
+      rujukan resolved + putusan MK), LexisAI chroma_db (amandemen
+      ITE/Tipikor/KPK, KUHAP 8/1981), riset domain APH (30 dokumen
+      markdown terkurasi — kategori doktrin, provenance aph://),
+      HuggingFace ipfs_indonesia_laws (1.924 UU / 105K pasal JDIH
+      BPK, flag law_status → source_status), dan HuggingFace
+      ID_Supreme_Court_Parquet (22.630 putusan MA pidana terstruktur
+      — dibatasi env HF_PUTUSAN_MAX). Idempotent via identitas
+      (nomor, tahun) atau source_url; provenance
+      spkt:// / lexisai:// / aph:// / hf://
+4. FASE AKUISISI CRAWL (untuk setiap node ontologi — hanya celah
+   yang tersisa setelah Fase 3):
    a. Formulasikan search queries untuk Google Search
    b. Prioritaskan domain terpercaya (JDIH, BPK, MA)
-   c. Unduh halaman web / dokumen PDF
-   d. Parse konten: nama UU, nomor pasal, bab, tanggal berlaku
-   e. Verifikasi: cross-check terhadap minimal 2 sumber
+   c. Unduh halaman web / dokumen PDF (OCR fallback via ocrmypdf+tesseract 'ind')
+   d. Parse konten: nama UU, nomor pasal, bab, subjek (klausa TENTANG), status
+   e. Verifikasi: identitas sumber↔isi, subjek↔topik node, status≠dicabut
    f. Chunk teks (500 char, 50 overlap)
-   g. Generate embedding → simpan ke ChromaDB koleksi GLOBAL `indonesian_laws`
-      (TANPA institution_id — pengetahuan hukum dibagikan semua institusi)
-   h. Identifikasi cross-references via LLM → simpan ke Neo4j graph GLOBAL
+   g. Generate embedding (E5: 'passage: '/'query: ') → simpan ke
+      ChromaDB koleksi GLOBAL `indonesian_laws` (TANPA institution_id)
+   h. Identifikasi cross-references → simpan ke Neo4j graph GLOBAL
       (node LegalArticle — TANPA institution_id)
    i. Catat di knowledge_registry (GLOBAL — satu registri seluruh platform)
-4. FASE EVALUASI DIRI:
-   a. Generate 3–5 pertanyaan uji per node ontologi
-   b. Query RAG pipeline sendiri
-   c. Skor jawaban menggunakan LLM-as-judge (0.0–1.0)
-   d. Jika skor < 0.7 per node: log gap, mulai riset ulang
-   e. Ulangi sampai skor keseluruhan ≥ 0.8
-5. Set knowledge_ready=true, update state
+5. FASE EVALUASI DIRI:
+   a. Skor deterministik per node (_EXPECTED_LAW_IDS) — bukan LLM judge
+   b. LLM-as-judge tetap berjalan untuk self_eval_logs/deteksi gap,
+      tapi TIDAK menentukan skor readiness
+   c. Node < 0.7: status gap_detected
+   d. Ulangi sampai skor keseluruhan ≥ 0.8
+6. Set knowledge_ready=true, update state
 ```
 
 ### Konfigurasi
@@ -224,17 +245,32 @@ Membangun landasan hukum komprehensif yang relevan dengan query pengguna. Agen i
 
 ```
 1. Terima query dari state
-2. Formulasikan search queries untuk ChromaDB
-3. Jalankan semantic search terhadap koleksi indonesian_laws
-   (mencakup KUHP, KUHAP, UU ITE, UU Tipikor, UU Narkotika, UU TPPU, Perkap, Perja, Putusan MA)
-4. Untuk setiap pasal relevan:
-   a. Ambil full content dari ChromaDB
-   b. Hitung relevance score
-   c. Query Neo4j untuk cross-references LINTAS UU
-5. Validasi terhadap KUHAP (hukum acara pidana)
-6. Rank pasal berdasarkan relevance score
-7. Generate legal_summary menggunakan LLM
-8. Update state
+2. Jalankan retrieval HIBRID (legal_foundation._rag_retrieve):
+   a. Dense E5 semantic search → cosine similarity langsung
+   b. BM25 leksikal (bm25.py, stopword Indonesia) — tangkap istilah
+      literal yang dense-miss
+   c. Reciprocal Rank Fusion + boost ≤0.008 untuk pasal yang
+      historis tersitasi-terverifikasi (tabel retrieval_feedback)
+   d. Boost deterministik _mention_boosts: identitas UU/Pasal yang
+      disebut eksplisit di query (regex + alias KUHAP/KUHP/dsb.)
+   e. Reranker cross-encoder lokal (CrossEncoder mMARCO-MiniLM,
+      env RERANKER_MODEL) mengurutkan top-48 kandidat — MRR@10
+      terukur 0.244→0.400; skor hanya mengatur urutan, bukan
+      relevance_score (skala abstention tetap cosine dense)
+   f. Indeks BM25 tersnapshot ke disk (BM25_INDEX_PATH) — cold-start
+      tak rebuild >100K chunk; invalidate pasca-ingest
+3. Query Neo4j untuk cross-references LINTAS UU
+4. ABSTENTION (pola regulated-rag/policyproof): tolak menjawab jika
+   bukti lemah — nol pasal, skor teratas <0.55, atau SEMUA sitasi di
+   luar set retrieval (ungrounded)
+5. Generate legal_summary menggunakan LLM
+6. Audit sitasi TIGA SUMBU deterministik (_audit_citations):
+   a. EKSISTENSI — setiap Pasal N tersitasi harus ada di set retrieval
+   b. FIDELITY — kalimat berisi sitasi harus berbagi kata-isi dengan
+      bunyi pasalnya (coverage ≥34%)
+   c. TEMPORAL — pasal dari UU yang berlaku SETELAH tahun peristiwa
+      di query ditandai anakronisme
+7. Update state
 ```
 
 ### Konfigurasi
@@ -739,3 +775,135 @@ Setiap eksekusi agent pipeline menghasilkan audit trail lengkap:
   "errors": []
 }
 ```
+
+---
+
+## Lampiran: Menjalankan ALA secara Native (tanpa Docker)
+
+Jika daemon Docker tidak tersedia, seluruh stack dapat berjalan native:
+
+```bash
+# 1. PostgreSQL — cluster milik user (port 5432, socket di /tmp)
+/usr/lib/postgresql/16/bin/initdb -D .pgdata -E UTF8 \
+    --auth-local=trust --auth-host=scram-sha-256
+/usr/lib/postgresql/16/bin/pg_ctl -D .pgdata -l /tmp/ala-pg.log \
+    -o "-p 5432 -k /tmp" start
+psql -h /tmp -p 5432 -U $USER -d postgres -c \
+    "CREATE USER ala_user WITH PASSWORD '<POSTGRES_PASSWORD>' SUPERUSER;
+     CREATE DATABASE ala_db OWNER ala_user;"
+
+# 2. Skema DB (membuat role ala_app + RLS)
+cd backend && python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+APP_DB_PASSWORD=<pass> \
+DATABASE_ADMIN_URL=postgresql://ala_user:<pass>@localhost:5432/ala_db \
+./.venv/bin/python scripts/init_db.py
+
+# 3. ChromaDB server (port 8001) & Neo4j 5 community tarball (port 7687)
+./.venv/bin/chroma run --host 127.0.0.1 --port 8001 --path ../.chroma &
+#   Neo4j: unduh dist.neo4j.org/neo4j-community-5.26.0-unix.tar.gz → .neo4j/
+#   ./bin/neo4j-admin dbms set-initial-password <NEO4J_PASSWORD>
+#   ./bin/neo4j start
+
+# 4. Backend FastAPI (port 8080 — sesuai default NEXT_PUBLIC_API_URL FE)
+cd backend && PYTHONDONTWRITEBYTECODE=1 \
+DATABASE_URL=postgresql://ala_app:<pass>@localhost:5432/ala_db \
+CHROMADB_HOST=127.0.0.1 CHROMADB_PORT=8001 \
+NEO4J_URI=bolt://localhost:7687 \
+OLLAMA_BASE_URL=http://localhost:11434 \
+OLLAMA_REASONING_URL=http://localhost:11434 \
+OLLAMA_CODER_URL=http://localhost:11434 \
+./.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8080
+
+# 5. Frontend
+cd frontend && npm install && npm run dev   # http://localhost:3000
+```
+
+Catatan: tanpa Docker, eksekusi sandbox kode AI (`/approve-workflow`)
+terdegradasi graceful — mengembalikan `Docker tidak tersedia`, pipeline
+lain tetap berfungsi.
+
+# 6. Sandbox — Rootless Docker (tanpa sudo; user tidak perlu grup docker)
+# Permanen via systemd --user (sudah terpasang):
+dockerd-rootless-setuptool.sh install   # membuat ~/.config/systemd/user/docker.service
+systemctl --user enable --now docker
+loginctl enable-linger petrick          # auto-start saat boot tanpa login
+export DOCKER_HOST=unix:///run/user/1000/docker.sock
+docker build -t ala-sandbox:latest sandbox/   # image eksekusi wajib ada
+# Backend mendapat DOCKER_HOST dari backend/.env.runtime (chmod 600,
+# digenerate dari .env — berisi DATABASE_URL, NEO4J_*, OLLAMA_*, dsb).
+
+# 7. Menjalankan SELURUH stack permanen (systemd --user, auto-start boot)
+systemctl --user enable --now ala-postgres ala-chroma ala-neo4j ala-api ala-frontend docker
+# Unit ada di ~/.config/systemd/user/ ; dependency ordering sudah diatur
+# (api menunggu postgres+chroma+neo4j+docker, frontend menunggu api).
+# Status/log:  systemctl --user status ala-api ; journalctl --user -u ala-api -f
+# Restart:     systemctl --user restart ala-api
+# Nonaktif:    systemctl --user disable --now ala-frontend (dst.)
+
+# 8. Korpus & embedding
+# Parser memotong bagian PENJELASAN agar pasal normatif tidak tertimpa.
+# Embedding: intfloat/multilingual-e5-small — prefix "query:"/"passage:"
+# wajib (spec E5); skor relevansi = cosine, threshold 0.75.
+# TIDAK ada skrip seed manual — korpus murni dibangun ALCD (NOL data).
+# Catatan: KUHP UU 1/2023 (berlaku 2026) — pencurian di Pasal 476.
+
+# 9. Akuisisi ALCD otonom (dari NOL — sesuai PLAN.md Fase 1)
+# Pipeline: ontologi → _plan_laws (LLM menalar NAMA UU per node) →
+# find_law (portal BPK memberi identitas nomor/tahun via URL) → parse →
+# _verify_law (silang identitas sumber ↔ blok judul dokumen) →
+# _subject_match (kata khas node cocok law_subject/klausa TENTANG — isi
+# pasal TIDAK dipakai; judul rencana halusinasi tak bisa menarik dokumen
+# asing ke node kanonik) → ingest. Dokumen tanpa identitas/subjek cocok
+# DITOLAK. Label law_name = identitas+subjek dokumen (bukan judul LLM).
+# BPK /Details/<record_id> ≠ /Download/<file_id> — parser memilih link
+# unduhan yang identitas filename-nya cocok slug halaman.
+# Evaluasi DETERMINISTIK (_EXPECTED_LAW_IDS + registry) menggerakkan
+# readiness; LLM-as-judge hanya ke self_eval_logs (pernah rubber-stamp
+# 0.977 pada korpus salah). _BOOTSTRAP_LOCK: satu bootstrap per proses,
+# dibagi job /alcd/trigger & node alcd di pipeline analyze.
+# Batasan diketahui: PDF scan tanpa text-layer di blok judul → identitas
+# tak terbaca → ditolak (gap tercatat; butuh OCR untuk menutup).
+# Registry dedup by source_url — bootstrap aman diulang (idempotent).
+
+# 10. Adopsi eksternal (riset GitHub/HuggingFace — Okt 2026)
+
+# Sumber korpus baru (external_corpus.py):
+#   aph://  — 30 dokumen riset domain APH terkurasi (kategori doktrin;
+#             BUKAN pasal primer — jangan disitasi sebagai UU)
+#   hf://laws — endomorphosis/ipfs_indonesia_laws: 1.924 UU / 105.645
+#             pasal dari JDIH BPK (parquet, butuh pyarrow). Dedupe
+#             identitas (nomor,tahun); law_status → source_status
+#             ('berlaku' vs non-current) untuk audit temporal.
+#             Prioritas: UU pidana/acara/APH dulu (_HF_APH_PRIORITY).
+#             Env: HF_CORPUS_DIR (cache parquet), HF_IMPORT_MAX_LAWS.
+#   hf://putusan — Azzindani/ID_Supreme_Court_Parquet: 22.630 putusan
+#             MA pidana terstruktur (kepala/dakwaan/fakta/amar).
+#             Env HF_PUTUSAN_MAX (default 2000; ≤0 = nonaktif).
+#             Kategori yurisprudensi — mengisi node yang tadinya tipis.
+
+# Evaluasi gold (scripts/eval_gold.py):
+#   .venv/bin/python scripts/eval_gold.py --k 10 [--match curated]
+#   Gold set: tests/gold/ala_curated.jsonl (15 pasangan Q→pasal yang
+#   dipetakan manual ke UU teregistrasi) + tests/gold/id_reg_qa.jsonl
+#   (400 QA dari horelulus/ID_REG_QA_Small). Metrik: coverage,
+#   HitRate@k, MRR. Progres terukur (korpus ~160 dok): baseline 0.20 →
+#   +mention-boost 0.467 HitRate → +reranker MRR 0.244→0.400.
+
+# Grounding & abstention (legal_foundation.py):
+#   _audit_citations kini 3 sumbu — eksistensi, fidelity, TEMPORAL
+#   (UU lebih muda dari tahun peristiwa di query → anakronisme).
+#   Abstention: nol pasal / top_score<0.55 / semua sitasi ungrounded →
+#   jawaban diganti pesan ⌀ ABSTAIN (audit['abstained'] mencatat alasan).
+
+# Parser hierarki (document_parser.py):
+#   BAB/Bagian/Paragraf dilacak per posisi; setiap pasal membawa
+#   'hierarchy' ("BAB II · Bagian Kesatu") yang di-anchor ke awal
+#   content chunk — pasal tak terpisah dari konteks strukturnya.
+
+# Embedding via konfigurasi:
+#   settings.embedding_model (env EMBEDDING_MODEL). Ganti model →
+#   ruang vektor berubah → WAJIB kosongkan koleksi + re-embed ulang.
+#   Jalur upgrade terdokumentasi: LazarusNLP/all-indo-e5-small-v4
+#   (384-dim drop-in, khusus Indonesia) lalu BGE-M3-ind (dense+sparse).
+
+# Ketergantungan baru: pyarrow (baca parquet HF) — ada di requirements.

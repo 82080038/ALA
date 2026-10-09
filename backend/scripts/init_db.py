@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS ai_audit_logs (
     execution_result JSONB,
     evidence_sha256_before CHAR(64),
     evidence_sha256_after  CHAR(64),
+    prev_hash       CHAR(64),
+    entry_hash      CHAR(64),
     metadata        JSONB DEFAULT '{}'
 );
 
@@ -91,7 +93,8 @@ CREATE TABLE IF NOT EXISTS knowledge_registry (
     law_name            VARCHAR(255) NOT NULL,
     law_number          VARCHAR(100),
     law_category        VARCHAR(50) NOT NULL
-                        CHECK (law_category IN ('materiil', 'formil', 'regulasi', 'yurisprudensi')),
+                        CHECK (law_category IN ('materiil', 'formil', 'regulasi',
+                                                'yurisprudensi', 'doktrin')),
     source_url          TEXT NOT NULL,
     source_domain       VARCHAR(255),
     discovery_date      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -111,6 +114,18 @@ CREATE TABLE IF NOT EXISTS knowledge_registry (
 CREATE INDEX IF NOT EXISTS idx_kr_law_name ON knowledge_registry(law_name);
 CREATE INDEX IF NOT EXISTS idx_kr_category ON knowledge_registry(law_category);
 CREATE INDEX IF NOT EXISTS idx_kr_status ON knowledge_registry(ingestion_status);
+
+-- Umpan balik retrieval — agregat penggunaan pasal (TANPA teks query)
+-- untuk boost hybrid retrieval dari riwayat sitasi terverifikasi.
+CREATE TABLE IF NOT EXISTS retrieval_feedback (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    law_name        VARCHAR(255) NOT NULL,
+    article_number  VARCHAR(50) NOT NULL,
+    cited           BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_rf_law_article
+    ON retrieval_feedback(law_name, article_number);
 
 CREATE TABLE IF NOT EXISTS ontology_nodes (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -156,6 +171,8 @@ ALTER TABLE cases ADD COLUMN IF NOT EXISTS institution_id UUID REFERENCES instit
 ALTER TABLE ai_audit_logs ADD COLUMN IF NOT EXISTS institution_id UUID REFERENCES institutions(id);
 ALTER TABLE ai_audit_logs ADD COLUMN IF NOT EXISTS evidence_sha256_before CHAR(64);
 ALTER TABLE ai_audit_logs ADD COLUMN IF NOT EXISTS evidence_sha256_after CHAR(64);
+ALTER TABLE ai_audit_logs ADD COLUMN IF NOT EXISTS prev_hash CHAR(64);
+ALTER TABLE ai_audit_logs ADD COLUMN IF NOT EXISTS entry_hash CHAR(64);
 CREATE INDEX IF NOT EXISTS idx_cases_institution ON cases(institution_id);
 CREATE INDEX IF NOT EXISTS idx_audit_institution ON ai_audit_logs(institution_id);
 """
@@ -239,8 +256,9 @@ def init_db() -> None:
     app_db_password = os.environ.get(
         "APP_DB_PASSWORD") or os.environ.get("POSTGRES_PASSWORD", "")
     if not app_db_password:
-        print("[PERINGATAN] APP_DB_PASSWORD/POSTGRES_PASSWORD kosong — "
-              "role ala_app akan dibuat tanpa password jika belum ada")
+        raise RuntimeError(
+            "APP_DB_PASSWORD/POSTGRES_PASSWORD kosong — menolak membuat "
+            "role ala_app tanpa password (akses DB aplikasi akan gagal)")
 
     # 0. Role aplikasi non-superuser (syarat RLS bekerja)
     with engine.begin() as conn:

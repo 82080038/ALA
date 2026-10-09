@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import router as api_v1_router
 from app.config import hw, print_hardware_report, settings
+from app.middleware.ratelimit import RateLimitMiddleware
 from app.middleware.tenant import TenantIsolationMiddleware
 
 
@@ -35,10 +36,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Urutan add_middleware terbalik saat eksekusi: CORS → rate limit → tenant.
 app.add_middleware(TenantIsolationMiddleware)
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
+    # Dev: izinkan origin localhost/127.0.0.1 di port berapapun
+    # (mis. proxy preview) — origin non-lokal tetap ditolak.
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

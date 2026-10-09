@@ -1,11 +1,21 @@
 "use client";
 
 /** Pemilih identitas pengguna — header-based auth sampai JWT tersedia. */
+import useSWR from "swr";
+import { fetchInstitutionOptions } from "@/lib/api-client";
 import { ROLES, TIERS, useSession, type Role, type Tier } from "@/lib/session";
 
 export default function IdentitySelector() {
   const { identity, setIdentity, hydrated } = useSession();
+  const { data } = useSWR(
+    hydrated ? "institution-options" : null,
+    () => fetchInstitutionOptions(identity),
+    { refreshInterval: 60000 }
+  );
+
   if (!hydrated) return null;
+  const institutions = data?.institutions ?? [];
+  const known = institutions.some((i) => i.id === identity.institutionId);
 
   return (
     <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -33,13 +43,29 @@ export default function IdentitySelector() {
           </option>
         ))}
       </select>
-      <input
-        aria-label="Institution ID"
-        className="w-72 rounded border bg-background px-2 py-1 font-mono"
-        placeholder="X-Institution-ID (UUID)"
-        value={identity.institutionId}
-        onChange={(e) => setIdentity({ institutionId: e.target.value.trim() })}
-      />
+      <select
+        aria-label="Institusi"
+        className="rounded border bg-background px-2 py-1"
+        value={known ? identity.institutionId : ""}
+        onChange={(e) => setIdentity({ institutionId: e.target.value })}
+      >
+        <option value="">— pilih institusi —</option>
+        {institutions.map((i) => (
+          <option key={i.id} value={i.id}>
+            {i.name}
+          </option>
+        ))}
+        {/* Pertahankan nilai tersimpan yang tidak ada di daftar (mis.
+            institusi dinonaktifkan) agar tidak hilang diam-diam. */}
+        {!known && identity.institutionId && (
+          <option value={identity.institutionId}>
+            {identity.institutionId.slice(0, 8)}… (tidak terdaftar)
+          </option>
+        )}
+      </select>
+      {identity.institutionId && !known && (
+        <span className="text-amber-600">institusi tidak valid</span>
+      )}
     </div>
   );
 }

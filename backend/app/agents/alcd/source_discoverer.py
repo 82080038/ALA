@@ -8,6 +8,7 @@ DuckDuckGo HTML search jika kunci CSE tidak dikonfigurasi.
 Rate limit ketat: maks ALCD_CRAWL_RATE_LIMIT request/detik per domain.
 """
 import logging
+import re
 import time
 from urllib.parse import urlparse
 
@@ -214,6 +215,61 @@ class SourceDiscoverer:
         except Exception as exc:
             logger.warning("BPK search gagal: %s", exc)
             return []
+
+    # ------------------------------------------------------------------
+    # Targeted law discovery — cari dokumen UU spesifik, bukan topik umum
+    # ------------------------------------------------------------------
+    _URL_LAW_RE = re.compile(
+        r"(?:UU|Undang-Undang|PERPU|UU%20|UU_)?[-_ %]*"
+        r"(?:Nomor|No\.?|%20No\.?)[-_ %]*(\d+[A-Za-z]?)[-_ %]*"
+        r"(?:Tahun|%20Tahun)[-_ %]*(\d{4})",
+        re.IGNORECASE)
+
+    @staticmethod
+    def url_law_identity(url: str) -> tuple[str | None, str | None]:
+        """Ekstrak (nomor, tahun) UU dari filename/slug URL sumber.
+
+        Pola umum: 'UU%20Nomor%201%20Tahun%202023.pdf',
+        'uu-no-8-tahun-2010', 'UU_45_2009.pdf'.
+        """
+        from urllib.parse import unquote
+        decoded = unquote(url)
+        m = re.search(
+            r"(?:Nomor|No\.?)\s*(\d+[A-Za-z]?)\s*Tahun\s*(\d{4})",
+            decoded, re.IGNORECASE)
+        if not m:
+            m = re.search(r"uu[-_ ]no\.?[-_ ]?(\d+)[-_ ]tahun[-_ ](\d{4})",
+                          decoded, re.IGNORECASE)
+        return (m.group(1), m.group(2)) if m else (None, None)
+
+    def find_law(self, title: str, number: str | None = None,
+                 year: str | None = None,
+                 max_results: int = 5) -> list[dict]:
+        """Cari dokumen UU di portal resmi berdasarkan judul.
+
+        Identitas kandidat diturunkan dari URL (filename/slug) bila ada —
+        dipakai `_verify_law` untuk verifikasi silang terhadap isi teks.
+        """
+        queries = [f"{title} Undang-Undang"]
+        if number and year:
+            queries.insert(
+                0, f"Undang-Undang Nomor {number} Tahun {year}")
+        results, seen = [], set()
+        for q in queries:
+            hits = (
+                self._google_cse(q, max_results)
+                or self._duckduckgo(q, max_results)
+                or self._bpk_search(q, max_results)
+            )
+            for h in hits:
+                url = h.get("url", "")
+                if url and url not in seen:
+                    seen.add(url)
+                    h["domain"] = _domain(url)
+                    n, y = self.url_law_identity(url)
+                    h["law_number"], h["law_year"] = n, y
+                    results.append(h)
+        return results
 
     # ------------------------------------------------------------------
     # Public API

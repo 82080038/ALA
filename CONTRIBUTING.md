@@ -37,11 +37,22 @@ docker compose exec api python scripts/init_db.py
 
 ```bash
 # Jalankan tests
-pytest tests/ -v
+cd backend && .venv/bin/python -m pytest tests/ -v    # baseline: 26 pass
 
-# Jalankan API server
+# Gold benchmark retrieval (P@k/MRR terhadap pasal gold nyata)
+set -a && . ./.env.runtime && set +a
+.venv/bin/python scripts/eval_gold.py --k 10 --match curated
+
+# Type-check frontend
+cd frontend && npx tsc --noEmit
+
+# Jalankan API server (dev)
 cd backend && uvicorn main:app --reload
 ```
+
+> **Deployment aktual** berjalan sebagai systemd user units
+> (`ala-postgres`/`ala-chroma`/`ala-neo4j`/`ala-api`/`ala-frontend`);
+> env runtime di `backend/.env.runtime`. Lihat DEPLOYMENT.md §2.3.
 
 ---
 

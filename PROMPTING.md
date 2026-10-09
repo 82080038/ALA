@@ -1,5 +1,10 @@
 # PROMPT UTAMA & MEGA-PLAN DEVIN: AUTONOMOUS LEGAL AGENT (ALA)
 
+> **📌 Dokumen historis (mega-plan awal).** Berisi prompt awal dan
+> rencana teknis (HIRO, dual-GPU Ollama) — sebagian sudah
+> diimplementasikan, sebagian berevolusi. Sumber kebenaran kondisi
+> saat ini: **AGENTS.md**, **ARCHITECTURE.md**, **CHANGELOG.md**.
+
 ## 🎯 TUJUAN SISTEM
 Membangun sistem intelijen otonom berkepatuhan tinggi untuk Aparat Penegak Hukum (APH) Indonesia. Sistem dimulai dengan NOL dokumen pra-muat. Sistem harus secara otonom menalar hukum apa yang dibutuhkan, menjelajahi internet untuk mengunduhnya, memetakannya ke database polyglot, melakukan evaluasi diri, dan menghasilkan alur kerja/alat utilitas di dalam sandbox yang aman.
 

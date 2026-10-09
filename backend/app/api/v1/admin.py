@@ -3,6 +3,7 @@ Endpoint Konsol Super Admin — manajemen institusi, pengguna, fitur, dan tier.
 Hanya dapat diakses oleh pengguna dengan role 'super_admin'.
 """
 import logging
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -24,6 +25,14 @@ logger = logging.getLogger("ala.api.admin")
 router = APIRouter(prefix="/admin", tags=["super-admin"])
 
 _TIERS = {"free", "premium_l1", "premium_l2"}
+
+
+def _parse_uuid(value: str) -> uuid.UUID:
+    """Parse UUID path param — 404 (bukan 500) jika tidak valid."""
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise HTTPException(404, "ID bukan UUID yang valid.")
 
 
 def _require_super_admin(request: Request) -> TenantContext:
@@ -48,6 +57,17 @@ class InstitutionCreate(BaseModel):
 
 class TierUpdate(BaseModel):
     tier_level: str
+
+
+class UserCreate(BaseModel):
+    institution_id: str
+    name: str = Field(..., min_length=2, max_length=255)
+    email: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=8, max_length=256)
+    role: str = Field(..., pattern="^(super_admin|admin_instansi|penyidik|jaksa|hakim)$")
+    tier_level: str = "free"
+    badge_number: Optional[str] = None
+    unit: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +121,38 @@ async def list_all_users(
     } for u in rows]}
 
 
+@router.post("/users", status_code=201)
+async def create_user(
+    body: UserCreate,
+    tenant: TenantContext = Depends(_require_super_admin),
+    db: Session = Depends(get_db),
+):
+    """Buat pengguna APH baru — password disimpan sebagai hash bcrypt."""
+    from app.auth import hash_password
+
+    if body.tier_level not in _TIERS:
+        raise HTTPException(400, f"tier_level harus salah satu: {_TIERS}")
+    if not db.get(Institution, _parse_uuid(body.institution_id)):
+        raise HTTPException(404, "Institusi tidak ditemukan.")
+    email = body.email.lower()
+    if db.scalar(select(User).where(User.email == email)):
+        raise HTTPException(409, "Email sudah terdaftar.")
+    user = User(
+        institution_id=uuid.UUID(body.institution_id),
+        name=body.name,
+        email=email,
+        password_hash=hash_password(body.password),
+        role=body.role,
+        tier_level=body.tier_level,
+        badge_number=body.badge_number,
+        unit=body.unit,
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return {"id": str(user.id), "email": user.email, "role": user.role}
+
+
 @router.post("/users/{user_id}/tier")
 async def set_user_tier(
     user_id: str,
@@ -111,7 +163,7 @@ async def set_user_tier(
     """Tetapkan tier akses pengguna (free, premium_l1, premium_l2)."""
     if body.tier_level not in _TIERS:
         raise HTTPException(400, f"tier_level harus salah satu: {_TIERS}")
-    user = db.get(User, user_id)
+    user = db.get(User, _parse_uuid(user_id))
     if not user:
         raise HTTPException(404, "Pengguna tidak ditemukan.")
     user.tier_level = body.tier_level
@@ -152,7 +204,7 @@ async def override_feature_tier(
     """Override tier fitur yang disarankan AI — keputusan akhir admin."""
     if body.tier_level not in _TIERS:
         raise HTTPException(400, f"tier_level harus salah satu: {_TIERS}")
-    feature = db.get(Feature, feature_id)
+    feature = db.get(Feature, _parse_uuid(feature_id))
     if not feature:
         raise HTTPException(404, "Fitur tidak ditemukan.")
     feature.admin_approved_tier = body.tier_level
@@ -169,7 +221,7 @@ async def toggle_feature(
     db: Session = Depends(get_db),
 ):
     """Aktivasi/deaktivasi fitur secara global."""
-    feature = db.get(Feature, feature_id)
+    feature = db.get(Feature, _parse_uuid(feature_id))
     if not feature:
         raise HTTPException(404, "Fitur tidak ditemukan.")
     feature.is_active = not feature.is_active
@@ -188,9 +240,10 @@ async def list_institution_features(
     db: Session = Depends(get_db),
 ):
     """Daftar fitur yang diaktifkan untuk institusi tertentu."""
+    inst_uuid = _parse_uuid(institution_id)
     rows = db.scalars(
         select(InstitutionFeature).where(
-            InstitutionFeature.institution_id == institution_id)
+            InstitutionFeature.institution_id == inst_uuid)
     ).all()
     return {"institution_id": institution_id, "features": [{
         "feature_id": str(m.feature_id), "is_enabled": m.is_enabled,
@@ -205,18 +258,20 @@ async def assign_feature_to_institution(
     db: Session = Depends(get_db),
 ):
     """Tetapkan/aktifkan fitur ke institusi tertentu."""
+    inst_uuid = _parse_uuid(institution_id)
+    feat_uuid = _parse_uuid(feature_id)
     existing = db.scalar(
         select(InstitutionFeature).where(
-            InstitutionFeature.institution_id == institution_id,
-            InstitutionFeature.feature_id == feature_id,
+            InstitutionFeature.institution_id == inst_uuid,
+            InstitutionFeature.feature_id == feat_uuid,
         )
     )
     if existing:
         existing.is_enabled = True
     else:
         db.add(InstitutionFeature(
-            institution_id=institution_id,
-            feature_id=feature_id,
+            institution_id=inst_uuid,
+            feature_id=feat_uuid,
             is_enabled=True,
             enabled_by=tenant.user_id,
         ))

@@ -132,9 +132,15 @@ def _legal_context_text(state) -> str:
             f"[{art.get('law_name')} {art.get('article_number')}] "
             f"{art.get('content', '')[:300]}"
         )
-    for xref in (state.get("legal_cross_references") or [])[:4]:
-        parts.append(f"XREF {xref.get('from_article')} → "
-                     f"{xref.get('to_article')}")
+    for xref in (state.get("cross_references") or [])[:4]:
+        targets = ", ".join(
+            f"{t.get('law', '')} {t.get('article', '')}".strip()
+            for t in (xref.get("to") or [])
+        )
+        parts.append(
+            f"XREF {xref.get('from_law', '')} "
+            f"{xref.get('from_article', '')} → {targets}"
+        )
     return "\n".join(parts)
 
 
@@ -212,12 +218,30 @@ def synthesis_developer_agent(state) -> dict:
     if code and _needs_custody(code, out.get("description", "")):
         code = _inject_custody(code)
 
+    # Validasi sintaks SEKARANG — kode terpotong (num_predict habis) atau
+    # malformed tidak layak diajukan ke persetujuan manusia.
+    syntax_valid = True
+    if code:
+        import ast
+        try:
+            ast.parse(code)
+        except SyntaxError as exc:
+            syntax_valid = False
+            updates.setdefault("errors", [])
+            updates["errors"] = updates["errors"] + [
+                f"Kode hasil AI tidak valid (SyntaxError baris "
+                f"{exc.lineno}: {exc.msg}) — kemungkinan terpotong limit "
+                f"token tier. Coba query ulang atau naikkan tier."
+            ]
+            logger.warning("Kode hasil AI gagal ast.parse: %s", exc)
+
     updates["generated_output"] = {
         "filename": out.get("filename", "utility.py"),
         "language": out.get("language", "python"),
         "description": out.get("description", ""),
         "code": code,
         "flowchart": out.get("flowchart", ""),
+        "syntax_valid": syntax_valid,
     }
     audit.update(
         status="success",

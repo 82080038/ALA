@@ -6,16 +6,21 @@ memfilter `institution_id` dari TenantContext DAN meng-set GUC
 `app.tenant_id` agar RLS PostgreSQL juga menegakkan batas tenant.
 Pengetahuan hukum (ChromaDB, Neo4j LegalArticle) tetap GLOBAL.
 """
+import asyncio
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from app.audit import append_audit
+from app.config import settings
 from app.database.postgres import get_db
 from app.middleware.tenant import TenantContext, get_tenant
 
@@ -31,6 +36,7 @@ router = APIRouter()
 class AnalyzeRequest(BaseModel):
     query: str = Field(..., min_length=3, max_length=4000)
     case_id: Optional[str] = None
+    mode: str = Field("full", pattern="^(full|legal)$")
 
 
 class ApproveRequest(BaseModel):
@@ -52,23 +58,92 @@ class GraphQueryRequest(BaseModel):
     parameters: dict = Field(default_factory=dict)
 
 
+class LoginRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=1, max_length=256)
+
+
 # ---------------------------------------------------------------------------
+# Auth — login lokal (JWT HS256), tanpa layanan eksternal
+# ---------------------------------------------------------------------------
+
+@router.post("/auth/login")
+async def login(body: LoginRequest, db: Session = Depends(get_db)):
+    """Verifikasi email+password → JWT Bearer (dipakai di Authorization)."""
+    from app.auth import create_token, verify_password
+    from app.models.tenant import User
+
+    user = db.scalar(
+        select(User).where(
+            func.lower(User.email) == body.email.lower(),
+            User.is_active.is_(True))
+    )
+    if not user or not verify_password(body.password, user.password_hash):
+        # Pesan generik — tidak bocorkan email mana yang terdaftar
+        raise HTTPException(401, "Email atau password salah.")
+    token = create_token(
+        user.id, user.institution_id, user.role, user.tier_level or "free")
+    return {
+        "token": token,
+        "token_type": "bearer",
+        "expires_in_hours": settings.jwt_expiry_hours,
+        "user": {
+            "id": str(user.id),
+            "name": user.name,
+            "role": user.role,
+            "tier": user.tier_level,
+            "institution_id": str(user.institution_id),
+        },
+    }
+
+
 # Helpers
 # ---------------------------------------------------------------------------
 
+_NIL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
 def _tenant_db(tenant: TenantContext, db: Session) -> Session:
-    """Set GUC app.tenant_id agar RLS PostgreSQL aktif untuk sesi ini."""
-    if tenant.institution_id and not tenant.is_super_admin:
+    """Set GUC app.tenant_id agar RLS PostgreSQL aktif untuk sesi ini.
+
+    Non-super-admin TANPA institution_id mendapat GUC nil-UUID — RLS
+    menolak semua baris tenant (tidak ada kebocoran lintas-institusi).
+    """
+    if not tenant.is_super_admin:
         db.execute(
             text("SELECT set_config('app.tenant_id', :tid, true)"),
-            {"tid": str(tenant.institution_id)},
+            {"tid": str(tenant.institution_id or _NIL_UUID)},
         )
     return db
+
+
+def _tenant_filter(tenant: TenantContext) -> uuid.UUID:
+    """institution_id efektif untuk filter query — nil-UUID jika anon."""
+    return tenant.institution_id or uuid.UUID(_NIL_UUID)
 
 
 def _require_auth(tenant: TenantContext) -> None:
     if not tenant.is_authenticated:
         raise HTTPException(401, "Autentikasi diperlukan.")
+
+
+# Referensi kuat ke task background — asyncio.create_task hanya menyimpan
+# weak-ref; tanpa ini job bisa dibatalkan GC di tengah jalan.
+_BG_TASKS: "set[asyncio.Task]" = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    """Jalankan coroutine background dengan referensi kuat + log exception."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _BG_TASKS.discard(t)
+        if not t.cancelled() and t.exception():
+            logger.error("Background task gagal: %s", t.exception())
+
+    task.add_done_callback(_done)
+    return task
 
 
 # ---------------------------------------------------------------------------
@@ -88,78 +163,175 @@ async def system_status(db: Session = Depends(get_db)):
     return {"api": "online", **readiness}
 
 
-@router.post("/analyze-trend")
+@router.get("/institutions")
+async def list_institutions(db: Session = Depends(get_db)):
+    """Daftar institusi aktif (id + nama) untuk pemilih identitas.
+
+    Fase header-auth: dipakai frontend agar pengguna memilih tenant yang
+    benar-benar ada, bukan mengetik UUID bebas.
+    """
+    from app.models.tenant import Institution
+
+    try:
+        rows = db.scalars(
+            select(Institution)
+            .where(Institution.is_active.is_(True))
+            .order_by(Institution.name)
+        ).all()
+        return {"institutions": [
+            {"id": str(i.id), "name": i.name, "type": i.type}
+            for i in rows]}
+    except Exception as exc:
+        logger.warning("List institutions gagal: %s", exc)
+        return {"institutions": []}
+
+
+@router.post("/analyze-trend", status_code=202)
 async def analyze_trend(
     body: AnalyzeRequest,
-    request: Request,
     tenant: TenantContext = Depends(get_tenant),
     db: Session = Depends(get_db),
 ):
-    """Jalankan pipeline 4-agen untuk satu query investigasi.
+    """Antrekan pipeline 4-agen sebagai job background.
 
-    Konteks token dibatasi `context_token_budget` dari tier pengguna
-    (free=2048, L1=8192, L2=16384 — diklamp ceiling hardware).
+    Mengembalikan request_id SEKETIKA — progres tiap agen dapat dipantau
+    real-time via GET /analyze-trend/{request_id} atau GET /activity.
+    Konteks token dibatasi `context_token_budget` dari tier pengguna.
     """
     _require_auth(tenant)
+    if not tenant.institution_id:
+        # Baris audit harus milik tenant — insert institution_id NULL
+        # ditolak policy RLS (chain-of-custody akan hilang diam-diam).
+        raise HTTPException(400, "X-Institution-ID diperlukan.")
+    from app import activity
+    from app.models.tenant import Institution
+
+    # Validasi institution eksis — FK ai_audit_logs.institution_id akan
+    # menolak baris untuk tenant fiktif (audit hilang diam-diam).
+    if not db.scalar(
+        select(Institution.id).where(
+            Institution.id == tenant.institution_id)
+    ):
+        raise HTTPException(400, "Institution ID tidak terdaftar.")
+
+    job = activity.create_job(
+        query=body.query,
+        institution_id=tenant.institution_id,
+        user_id=tenant.user_id,
+        kind="analyze",
+        mode=body.mode,
+    )
+    _spawn(_run_analysis_job(job["request_id"], body, tenant))
+    return {"request_id": job["request_id"], "status": "queued"}
+
+
+async def _run_analysis_job(
+    job_id: str, body: AnalyzeRequest, tenant: TenantContext
+) -> None:
+    """Worker background: pipeline → audit log → registry job."""
+    from app import activity
     from app.agents.legal_orchestrator import run_pipeline
+    from app.database.postgres import SessionLocal
     from app.models.operational import AiAuditLog
 
-    request_id = uuid.uuid4()
     try:
-        state = run_pipeline(
+        state = await run_in_threadpool(
+            run_pipeline,
             query=body.query,
             institution_id=str(tenant.institution_id or ""),
             tier_level=tenant.tier_level,
             context_token_budget=tenant.context_token_budget,
+            on_node=lambda node: activity.set_stage(job_id, node),
+            mode=body.mode,
         )
     except Exception as exc:
-        logger.exception("Pipeline gagal")
-        raise HTTPException(500, f"Pipeline error: {exc}")
+        logger.exception("Pipeline gagal (job %s)", job_id)
+        activity.fail_job(job_id, str(exc))
+        return
 
-    # Immutable audit log (append-only, tenant-scoped)
-    try:
-        _tenant_db(tenant, db)
-        db.add(AiAuditLog(
-            institution_id=tenant.institution_id,
-            request_id=request_id,
-            action="analyze",
-            user_id=tenant.user_id,
-            case_id=uuid.UUID(body.case_id) if body.case_id else None,
-            query_input=body.query,
-            action_taken="pipeline_4_agents",
-            crime_trend={"summary": state.get("crime_summary", ""),
-                         "sources": state.get("crime_data", [])[:10]},
-            legal_articles=[{
-                "law": a.get("law_name"),
-                "article": a.get("article_number"),
-                "score": a.get("relevance_score"),
-            } for a in (state.get("legal_articles") or [])[:15]],
-            code_generated=(state.get("generated_output") or {}).get("code"),
-            metadata_={
-                "knowledge_score": state.get("knowledge_score"),
-                "token_budget": tenant.context_token_budget,
-                "audit_trail": state.get("audit_trail", []),
-            },
-        ))
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        logger.warning("Audit log gagal disimpan: %s", exc)
-
-    return {
-        "request_id": str(request_id),
+    result = {
+        "request_id": job_id,
         "knowledge_ready": state.get("knowledge_ready"),
         "knowledge_score": state.get("knowledge_score"),
         "legal_summary": state.get("legal_summary", ""),
         "legal_articles": state.get("legal_articles", []),
-        "cross_references": state.get("legal_cross_references", []),
+        "cross_references": state.get("cross_references", []),
         "crime_summary": state.get("crime_summary", ""),
         "crime_data": state.get("crime_data", []),
         "synthesis": state.get("synthesis", {}),
         "generated_output": state.get("generated_output", {}),
         "errors": state.get("errors", []),
-        "requires_approval": True,
+        # Approval hanya relevan jika memang ada kode yang dihasilkan —
+        # mode "legal" tidak menghasilkan kode sama sekali.
+        "requires_approval": bool(
+            (state.get("generated_output") or {}).get("code")),
     }
+
+    # Immutable audit log — session baru (session request sudah ditutup).
+    try:
+        db = SessionLocal()
+        try:
+            _tenant_db(tenant, db)
+            append_audit(
+                db,
+                institution_id=tenant.institution_id,
+                request_id=uuid.UUID(job_id),
+                action="analyze",
+                user_id=tenant.user_id,
+                case_id=uuid.UUID(body.case_id) if body.case_id else None,
+                query_input=body.query,
+                action_taken="pipeline_4_agents",
+                crime_trend={"summary": state.get("crime_summary", ""),
+                             "sources": state.get("crime_data", [])[:10]},
+                legal_articles=[{
+                    "law": a.get("law_name"),
+                    "article": a.get("article_number"),
+                    "score": a.get("relevance_score"),
+                } for a in (state.get("legal_articles") or [])[:15]],
+                code_generated=(
+                    state.get("generated_output") or {}).get("code"),
+                metadata_={
+                    "knowledge_score": state.get("knowledge_score"),
+                    "token_budget": tenant.context_token_budget,
+                    "audit_trail": state.get("audit_trail", []),
+                },
+            )
+            db.commit()
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("Audit log gagal disimpan: %s", exc)
+
+    activity.complete_job(job_id, result)
+
+
+@router.get("/analyze-trend/{request_id}")
+async def analyze_status(
+    request_id: str,
+    tenant: TenantContext = Depends(get_tenant),
+):
+    """Status job pipeline — tahap agen aktif + hasil jika selesai."""
+    _require_auth(tenant)
+    from app import activity
+
+    # Scope tenant: job milik institusi lain → 404 (tidak bisa di-probe).
+    scope = None if tenant.is_super_admin else str(_tenant_filter(tenant))
+    job = activity.get_job(request_id, scope)
+    if not job:
+        raise HTTPException(404, "Job tidak ditemukan.")
+    return job
+
+
+@router.get("/activity")
+async def list_activity(tenant: TenantContext = Depends(get_tenant)):
+    """Aktivitas pipeline real-time milik tenant ini (running dulu)."""
+    _require_auth(tenant)
+    from app import activity
+
+    institution = (
+        None if tenant.is_super_admin else str(_tenant_filter(tenant))
+    )
+    return {"jobs": activity.list_jobs(institution)}
 
 
 @router.post("/approve-workflow")
@@ -192,18 +364,21 @@ async def approve_workflow(
         raise HTTPException(400, "Tidak ada kode untuk dieksekusi.")
 
     if not body.approved:
-        db.add(AiAuditLog(
+        append_audit(
+            db,
             institution_id=tenant.institution_id,
             request_id=req_uuid,
             action="reject",
             user_id=tenant.user_id,
             action_taken="workflow_ditolak_pengguna",
-        ))
+        )
         db.commit()
         return {"request_id": body.request_id, "status": "rejected"}
 
-    exec_result = run_in_sandbox(audit_row.code_generated)
-    db.add(AiAuditLog(
+    exec_result = await run_in_threadpool(
+        run_in_sandbox, audit_row.code_generated)
+    append_audit(
+        db,
         institution_id=tenant.institution_id,
         request_id=req_uuid,
         action="execute",
@@ -217,7 +392,7 @@ async def approve_workflow(
             "stdout_tail": exec_result.stdout[-2000:],
         },
         metadata_={"approved_by": body.approved_by},
-    ))
+    )
     db.commit()
 
     return {
@@ -245,8 +420,8 @@ async def list_cases(
 
     _tenant_db(tenant, db)
     query = select(Case).order_by(Case.created_at.desc()).limit(100)
-    if tenant.institution_id and not tenant.is_super_admin:
-        query = query.where(Case.institution_id == tenant.institution_id)
+    if not tenant.is_super_admin:
+        query = query.where(Case.institution_id == _tenant_filter(tenant))
     rows = db.scalars(query).all()
     return {"cases": [{
         "id": str(c.id), "title": c.title, "status": c.status,
@@ -299,9 +474,9 @@ async def list_audit_logs(
     _tenant_db(tenant, db)
     query = select(AiAuditLog).order_by(
         AiAuditLog.timestamp.desc()).limit(min(limit, 200))
-    if tenant.institution_id and not tenant.is_super_admin:
+    if not tenant.is_super_admin:
         query = query.where(
-            AiAuditLog.institution_id == tenant.institution_id)
+            AiAuditLog.institution_id == _tenant_filter(tenant))
     rows = db.scalars(query).all()
     return {"logs": [{
         "id": str(l.id), "timestamp": l.timestamp.isoformat()
@@ -310,7 +485,22 @@ async def list_audit_logs(
         "query_input": (l.query_input or "")[:200],
         "evidence_sha256_before": l.evidence_sha256_before,
         "evidence_sha256_after": l.evidence_sha256_after,
+        "entry_hash": l.entry_hash,
     } for l in rows]}
+
+
+@router.get("/audit-logs/verify")
+async def verify_audit(
+    tenant: TenantContext = Depends(get_tenant),
+    db: Session = Depends(get_db),
+):
+    """Verifikasi integritas hash-chain audit log (super_admin)."""
+    _require_auth(tenant)
+    if not tenant.is_super_admin:
+        raise HTTPException(403, "Hanya super_admin.")
+    from app.audit import verify_audit_chain
+
+    return verify_audit_chain(db)
 
 
 # ---------------------------------------------------------------------------
@@ -327,11 +517,14 @@ async def graph_query(
     Perintah tulis (CREATE/MERGE/DELETE/SET/DROP) ditolak keras.
     """
     _require_auth(tenant)
+    import re
+
+    # Buang komentar // ... lalu cek keyword tulis dengan word-boundary —
+    # pemeriksaan berbasis spasi bisa dibypass via newline/tab.
+    stripped = re.sub(r"//[^\n]*", " ", body.cypher)
     forbidden = ("CREATE", "MERGE", "DELETE", "SET", "DROP", "CALL",
-                 "LOAD", "REMOVE")
-    upper = body.cypher.upper()
-    if any(f" {kw} " in f" {upper} " or upper.startswith(kw)
-           for kw in forbidden):
+                 "LOAD", "REMOVE", "DETACH")
+    if re.search(rf"\b({'|'.join(forbidden)})\b", stripped.upper()):
         raise HTTPException(400, "Hanya query baca yang diizinkan.")
 
     from app.database.neo4j import get_neo4j_driver
@@ -360,12 +553,18 @@ async def alcd_status(db: Session = Depends(get_db)):
     from app.agents.curriculum_designer import check_readiness
     from app.models.operational import KnowledgeRegistry, SelfEvalLog
 
-    readiness = check_readiness(db)
-    total_chunks = db.scalar(
-        select(func.coalesce(func.sum(KnowledgeRegistry.chunk_count), 0)))
-    unresolved_gaps = db.scalar(
-        select(func.count(SelfEvalLog.id)).where(
-            SelfEvalLog.resolved.is_(False))) or 0
+    try:
+        readiness = check_readiness(db)
+        total_chunks = db.scalar(
+            select(func.coalesce(func.sum(KnowledgeRegistry.chunk_count), 0)))
+        unresolved_gaps = db.scalar(
+            select(func.count(SelfEvalLog.id)).where(
+                SelfEvalLog.resolved.is_(False))) or 0
+    except Exception as exc:
+        logger.warning("ALCD status gagal: %s", exc)
+        return {"knowledge_ready": False, "knowledge_score": 0.0,
+                "ontology_nodes": 0, "laws_ingested": 0,
+                "total_chunks": 0, "unresolved_gaps": 0}
     return {
         **readiness,
         "total_chunks": int(total_chunks or 0),
@@ -373,37 +572,283 @@ async def alcd_status(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/alcd/trigger")
-async def alcd_trigger(
-    tenant: TenantContext = Depends(get_tenant),
-    db: Session = Depends(get_db),
-):
-    """Picu bootstrap ALCD manual (butuh auth; proses berat)."""
+@router.post("/alcd/trigger", status_code=202)
+async def alcd_trigger(tenant: TenantContext = Depends(get_tenant)):
+    """Antrekan bootstrap ALCD sebagai job background (proses berat,
+    bisa bermenit-menit). Pantau via GET /activity atau
+    /analyze-trend/{request_id}."""
     _require_auth(tenant)
-    from app.agents.curriculum_designer import run_bootstrap
+    # Bootstrap mahal (jam, ratusan dokumen) — hanya admin yang boleh
+    # memicunya; role operasional cukup mengonsumsi pengetahuan.
+    if tenant.user_role not in ("super_admin", "admin_instansi"):
+        raise HTTPException(
+            403, "Trigger ALCD hanya untuk super_admin/admin_instansi.")
+    from app import activity
 
+    if activity.has_running("alcd_bootstrap"):
+        raise HTTPException(409, "Bootstrap ALCD sedang berjalan.")
+    job = activity.create_job(
+        query="ALCD bootstrap",
+        institution_id=tenant.institution_id,
+        user_id=tenant.user_id,
+        kind="alcd_bootstrap",
+    )
+    _spawn(_run_alcd_job(job["request_id"]))
+    return {"request_id": job["request_id"], "status": "queued"}
+
+
+async def _run_alcd_job(job_id: str) -> None:
+    """Worker bootstrap ALCD — session DB baru (bukan milik request)."""
+    from app import activity
+    from app.agents.curriculum_designer import run_bootstrap
+    from app.database.postgres import SessionLocal
+
+    db = SessionLocal()
     try:
-        return run_bootstrap(db)
+        activity.set_stage(job_id, "alcd")
+        result = await run_in_threadpool(run_bootstrap, db)
+        activity.complete_job(
+            job_id,
+            result if isinstance(result, dict) else {"detail": str(result)},
+        )
     except Exception as exc:
-        logger.exception("ALCD trigger gagal")
-        raise HTTPException(500, f"ALCD error: {exc}")
+        logger.exception("ALCD bootstrap gagal (job %s)", job_id)
+        activity.fail_job(job_id, str(exc))
+    finally:
+        db.close()
 
 
 @router.get("/alcd/ontology")
 async def alcd_ontology(db: Session = Depends(get_db)):
-    """Pohon ontologi pengetahuan yang dirumuskan ALCD — GLOBAL."""
-    from app.models.operational import OntologyNode
+    """Pohon ontologi pengetahuan yang dirumuskan ALCD — GLOBAL.
+
+    Tiap node membawa `laws` (UU teregistrasi yang cocok node) dan
+    `articles` (pasal nyata yang tertanam di ChromaDB) — inilah "isi
+    otak" yang divisualisasikan frontend."""
+    import re as _re
+
+    from app.agents.curriculum_designer import (
+        _EXPECTED_LAW_IDS,
+        _subject_match,
+    )
+    from app.models.operational import KnowledgeRegistry, OntologyNode
 
     rows = db.scalars(
         select(OntologyNode).order_by(
             OntologyNode.priority, OntologyNode.category)
     ).all()
-    return {"nodes": [{
-        "id": str(n.id), "category": n.category,
-        "subcategory": n.subcategory, "priority": n.priority,
-        "status": n.status, "knowledge_score": n.knowledge_score,
-        "laws_ingested": n.laws_ingested,
-    } for n in rows]}
+
+    laws = db.scalars(
+        select(KnowledgeRegistry).where(
+            KnowledgeRegistry.ingestion_status.in_(
+                ["completed", "verified"]))
+    ).all()
+
+    # Pasal nyata per UU — dari metadata chunk di ChromaDB.
+    arts_by_law: dict[str, list[str]] = {}
+    try:
+        from app.database.chroma import (
+            get_chroma_client,
+            get_laws_collection,
+        )
+
+        coll = get_laws_collection(get_chroma_client())
+        got = coll.get(include=["metadatas"], limit=20000)
+        for m in got.get("metadatas") or []:
+            ln, an = m.get("law_name") or "", m.get("article_number") or ""
+            if ln and an:
+                lst = arts_by_law.setdefault(ln, [])
+                if an not in lst:
+                    lst.append(an)
+    except Exception as exc:
+        logger.warning("alcd/ontology: baca Chroma gagal: %s", exc)
+
+    # Petakan UU → node: identitas kanonik (nomor+tahun) lebih dulu,
+    # lalu kecocokan subjek (klausa TENTANG) dengan topik node.
+    node_laws: dict[int, list] = {i: [] for i in range(len(rows))}
+    unassigned = []
+    for r in laws:
+        meta = r.metadata_ or {}
+        num = (r.law_number or "").lstrip("0")
+        year = str(meta.get("law_year") or "")
+        if not year:
+            m2 = _re.search(r"Tahun\s+(\d{4})", r.law_name or "")
+            year = m2.group(1) if m2 else ""
+        probe = {"law_subject": meta.get("law_subject") or "",
+                 "law_name": r.law_name or ""}
+        placed = False
+        # Doktrin & yurisprudensi hanya boleh menempati node hint-nya —
+        # subjek konsep ("Sejarah Hukum Pidana") akan salah menempel ke
+        # node UU lewat _subject_match bila dibiarkan.
+        if r.law_category in ("doktrin", "yurisprudensi"):
+            from app.agents.curriculum_designer import _NODE_CATEGORY_HINT
+            for i, n in enumerate(rows):
+                k = (n.subcategory or n.category or "").strip().lower()
+                if _NODE_CATEGORY_HINT.get(k) == r.law_category:
+                    node_laws[i].append(r)
+                    placed = True
+                    break
+            if not placed:
+                unassigned.append(r.law_name)
+            continue
+        for i, n in enumerate(rows):
+            key = (n.subcategory or n.category or "").strip().lower()
+            exp = _EXPECTED_LAW_IDS.get(key)
+            if exp is not None and (num, year) in exp:
+                node_laws[i].append(r)
+                placed = True
+                break
+        if placed:
+            continue
+        for i, n in enumerate(rows):
+            if _subject_match(n.subcategory or n.category or "",
+                              "", probe):
+                node_laws[i].append(r)
+                placed = True
+                break
+        if not placed:
+            unassigned.append(r.law_name)
+
+    nodes_out = []
+    for i, n in enumerate(rows):
+        lws = node_laws[i]
+        articles: list[str] = []
+        for r in lws:
+            for a in arts_by_law.get(r.law_name, []):
+                if a not in articles:
+                    articles.append(a)
+        law_rows = []
+        for r in lws:
+            # Registry lama bisa kehilangan law_number/law_year — ambil
+            # dari law_name kanonik ("UU Nomor N Tahun Y …").
+            num = r.law_number
+            year = (r.metadata_ or {}).get("law_year")
+            m2 = _re.search(r"Nomor\s+(\d+)\s+Tahun\s+(\d{4})",
+                            r.law_name or "")
+            if m2:
+                num = num or m2.group(1)
+                year = year or m2.group(2)
+            law_rows.append({
+                "law_name": r.law_name,
+                "law_number": num,
+                "law_year": year,
+                "chunk_count": r.chunk_count,
+                "article_count": r.article_count,
+            })
+        nodes_out.append({
+            "id": str(n.id), "category": n.category,
+            "subcategory": n.subcategory, "priority": n.priority,
+            "status": n.status, "knowledge_score": n.knowledge_score,
+            "laws_ingested": n.laws_ingested,
+            "laws": law_rows,
+            "articles": articles[:48],
+        })
+    # Relasi rujukan antar-pasal nyata (Neo4j CROSS_REFERENCES) — inilah
+    # "alasan" sinaps tersambung pada visualisasi otak. Ujung relasi
+    # di-resolve ke INDEX node ontologi ("undang-undang ini" → wilayah
+    # sumber; "UU ITE." → node UU ITE via kata khas topik).
+    from app.agents.curriculum_designer import (
+        _CANONICAL_LAW_NAMES,
+        _topic_keywords,
+    )
+
+    # law_name registry → index wilayah (sumber relasi = dokumen ingest)
+    law_region = {
+        r.law_name: i for i, lws in node_laws.items() for r in lws}
+    topic_words = [
+        _topic_keywords(
+            _CANONICAL_LAW_NAMES.get(
+                (n.subcategory or n.category or "").strip().lower(),
+                n.subcategory or n.category or ""))
+        for n in rows
+    ]
+
+    def _region_of(ref: str, src_region: int | None) -> int | None:
+        ref = (ref or "").strip().rstrip(".").lower()
+        if not ref:
+            return None
+        if "undang-undang ini" in ref or "uu ini" in ref:
+            return src_region
+        if ref in law_region:
+            return law_region[ref]
+        for i, nw in enumerate(topic_words):
+            topic = (rows[i].subcategory or rows[i].category or "").lower()
+            if topic and topic in ref:
+                return i
+            if nw and sum(1 for w in nw if w in ref) >= max(
+                    1, math.ceil(len(nw) * 0.6)):
+                return i
+        return None
+
+    links = []
+    try:
+        from app.database.neo4j import get_neo4j_driver
+
+        driver = get_neo4j_driver()
+        with driver.session() as s:
+            for rec in s.run(
+                "MATCH (a:LegalArticle)-[r]->(b:LegalArticle) "
+                "RETURN a.law_name AS fl, a.article_number AS fa, "
+                "b.law_name AS tl, b.article_number AS ta, "
+                "type(r) AS rel LIMIT 400"
+            ):
+                fr = _region_of(rec["fl"], None)
+                tr = _region_of(rec["tl"], fr)
+                if fr is not None and tr is not None:
+                    links.append({"fr": fr, "fa": rec["fa"],
+                                  "tr": tr, "ta": rec["ta"],
+                                  "rel": rec["rel"]})
+        driver.close()
+    except Exception as exc:
+        logger.warning("alcd/ontology: baca Neo4j gagal: %s", exc)
+
+    return {"nodes": nodes_out, "unassigned_laws": unassigned,
+            "links": links[:200]}
+
+
+@router.get("/alcd/progress")
+async def alcd_progress(db: Session = Depends(get_db)):
+    """Progres live bootstrap ALCD — wilayah & tahap yang SEDANG
+    dikerjakan (untuk kamera otak dan neural.log), plus feed pengetahuan:
+
+    - `recent`: dokumen terakhir yang BERHASIL ditanam (registry terbaru)
+    - `queue`: node ontologi berikutnya dalam antrean (pending/gap) —
+      "rencana belajar" yang masih hidup
+
+    GLOBAL, publik."""
+    from app.agents.curriculum_designer import current_progress
+    from app.models.operational import KnowledgeRegistry, OntologyNode
+    from sqlalchemy import desc
+
+    prog = current_progress()
+    recent = [
+        {
+            "name": r.law_name,
+            "articles": r.article_count,
+            "chunks": r.chunk_count,
+            "cat": r.law_category,
+            "ts": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in db.scalars(
+            select(KnowledgeRegistry)
+            .where(KnowledgeRegistry.ingestion_status.in_(
+                ["completed", "verified"]))
+            .order_by(desc(KnowledgeRegistry.created_at))
+            .limit(5)
+        ).all()
+    ]
+    queue = [
+        {"topic": n.subcategory or n.category, "status": n.status,
+         "score": round(n.knowledge_score or 0.0, 2)}
+        for n in db.scalars(
+            select(OntologyNode)
+            .where(OntologyNode.status.in_(
+                ["pending", "in_progress", "gap_detected"]))
+            .order_by(OntologyNode.priority)
+            .limit(6)
+        ).all()
+    ]
+    return {**prog, "recent": recent, "queue": queue}
 
 
 @router.get("/alcd/gaps")

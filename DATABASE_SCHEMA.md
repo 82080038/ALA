@@ -153,6 +153,8 @@ CREATE TABLE ai_audit_logs (
     execution_result JSONB,
     evidence_sha256_before CHAR(64),   -- Chain of custody: hash SHA-256 file bukti SEBELUM proses
     evidence_sha256_after  CHAR(64),   -- Chain of custody: hash SHA-256 file bukti SESUDAH proses
+    prev_hash       CHAR(64),          -- hash-chain: entry_hash baris sebelumnya (tamper-evident)
+    entry_hash      CHAR(64),          -- SHA-256(prev_hash|request_id|action|action_taken|inst|user|timestamp UTC)
     metadata        JSONB DEFAULT '{}' -- Termasuk tier_level & clamp token (num_ctx) yang diterapkan
 );
 
@@ -195,7 +197,7 @@ CREATE TABLE knowledge_registry (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     law_name            VARCHAR(255) NOT NULL,
     law_number          VARCHAR(100),
-    law_category        VARCHAR(50) NOT NULL CHECK (law_category IN ('materiil', 'formil', 'regulasi', 'yurisprudensi')),
+    law_category        VARCHAR(50) NOT NULL CHECK (law_category IN ('materiil', 'formil', 'regulasi', 'yurisprudensi', 'doktrin')),
     source_url          TEXT NOT NULL,
     source_domain       VARCHAR(255),
     discovery_date      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -219,12 +221,13 @@ CREATE INDEX idx_kr_status ON knowledge_registry(ingestion_status);
 |-------|------|-----------|
 | `law_name` | `VARCHAR(255)` | Nama UU (e.g., "KUHP", "UU TPPU") |
 | `law_number` | `VARCHAR(100)` | Nomor UU (e.g., "No. 8/2010") |
-| `law_category` | `VARCHAR(50)` | Kategori: materiil, formil, regulasi, yurisprudensi |
-| `source_url` | `TEXT` | URL sumber tempat dokumen ditemukan |
+| `law_category` | `VARCHAR(50)` | Kategori: materiil, formil, regulasi, yurisprudensi, **doktrin** (ilmu dasar + riset domain — bukan teks primer) |
+| `source_url` | `TEXT` | Provenance: `https://` (crawl), `spkt://`, `lexisai://`, `aph://`, `hf://laws`, `hf://putusan/<id>` |
 | `ingestion_status` | `VARCHAR(50)` | Status pipeline: pending → downloading → parsing → embedding → completed |
 | `chunk_count` | `INTEGER` | Jumlah chunks yang di-embed ke ChromaDB |
 | `verification_score` | `FLOAT` | Skor verifikasi silang (0.0–1.0) |
 | `gaps_identified` | `TEXT[]` | Daftar gap yang teridentifikasi |
+| `metadata.source_status` | `JSONB` | Status berlaku dari sumber (`berlaku`, non-current, `riset-terkurasi`) — dipakai audit temporal sitasi |
 
 ### 1.5 Tabel `ontology_nodes` *(NEW — ALCD Module — SCOPE: GLOBAL)*
 
@@ -274,7 +277,26 @@ CREATE INDEX idx_selfeval_node ON self_eval_logs(ontology_node_id);
 CREATE INDEX idx_selfeval_quality ON self_eval_logs(answer_quality);
 ```
 
-### 1.7 Entity Relationship Diagram
+### 1.7 Tabel `retrieval_feedback` *(SCOPE: GLOBAL — agregat saja)*
+
+Umpan balik pembelajaran retrieval: pasal yang historis tersitasi-
+terverifikasi mendapat boost RRF kecil (≤0.008 ≈ ½ peringkat). **Tabel
+ini sengaja hanya menyimpan agregat** — teks query tidak disimpan
+(privasi tenant; pola memori-usage tanpa jejak query).
+
+```sql
+CREATE TABLE retrieval_feedback (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    law_name        VARCHAR(255) NOT NULL,
+    article_number  VARCHAR(50)  NOT NULL,
+    cited           BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_rf_law ON retrieval_feedback(law_name, article_number);
+```
+
+### 1.8 Entity Relationship Diagram
 
 ```
 ┌──────────────┐       ┌──────────────┐       ┌──────────────────┐
@@ -312,7 +334,7 @@ Menyimpan embeddings dari **seluruh dokumen hukum positif Indonesia** untuk penc
 |-------|--------------|
 | **Collection Name** | `indonesian_laws` |
 | **Scope** | **GLOBAL** — shared legal knowledge, no tenant filter |
-| **Embedding Function** | `sentence-transformers/all-MiniLM-L6-v2` |
+| **Embedding Function** | `intfloat/multilingual-e5-small` (konfigurasi `EMBEDDING_MODEL`; prefix `query:`/`passage:` wajib — spec E5) |
 | **Embedding Dimension** | 384 |
 | **Distance Metric** | Cosine similarity |
 | **Initial State** | **EMPTY** — populated autonomously by ALCD module |
@@ -347,10 +369,10 @@ Setiap dokumen dalam koleksi memiliki:
 | `law_name` | `string` | Nama UU: `KUHP`, `KUHAP`, `UU_ITE`, `UU_TIPIKOR`, `UU_NARKOTIKA`, `UU_TPPU`, `PERKAP`, `PERJA`, `PUTUSAN_MA` |
 | `article_number` | `string` | Nomor pasal: `Pasal 30`, `Pasal 362`, dll. |
 | `topic` | `string` | Topik: `Pencurian`, `Akses Ilegal`, `Penipuan`, `Korupsi`, `Narkotika`, `Pencucian Uang`, dll. |
-| `law_category` | `string` | Kategori: `materiil`, `formil`, `regulasi`, `yurisprudensi` |
+| `law_category` | `string` | Kategori: `materiil`, `formil`, `regulasi`, `yurisprudensi`, `doktrin` |
 | `chunk_index` | `integer` | Index chunk (0-based) |
 | `total_chunks` | `integer` | Total chunks untuk pasal tersebut |
-| `source_url` | `string` | URL sumber tempat ALCD menemukan dokumen |
+| `source_url` | `string` | Provenance: `https://` (crawl resmi), `spkt://`, `lexisai://`, `aph://`, `hf://` |
 | `discovery_date` | `string` | Tanggal dokumen ditemukan (ISO 8601) |
 | `verified` | `boolean` | Apakah konten terverifikasi lintas minimal 2 sumber |
 

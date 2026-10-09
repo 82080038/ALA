@@ -7,8 +7,10 @@ Mekanisme:
 3. Super Admin (`role = 'super_admin'`) dapat mengakses semua tenant.
 4. Pengguna biasa hanya melihat data dari institusi mereka sendiri.
 
-Fase 1: Placeholder — JWT belum diimplementasi penuh.
-         Menggunakan header X-Institution-ID dan X-User-Role untuk pengujian.
+Fase 2: JWT HS256 aktif (header `Authorization: Bearer ...` dari
+`POST /api/v1/auth/login`). Header `X-Institution-ID`/`X-User-Role`
+hanya dihormati bila `AUTH_DEV_HEADERS=true` — fallback pengembangan
+lokal, WAJIB dimatikan di deployment nyata.
 """
 import logging
 from uuid import UUID
@@ -76,8 +78,43 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
             request.state.tenant = TenantContext()
             return await call_next(request)
 
-        # --- Fase 1: Ekstrak dari header pengujian ---
-        # Akan diganti dengan JWT decode di Fase 2
+        # --- Jalur utama: JWT Bearer ---
+        authz = request.headers.get("Authorization", "")
+        if authz.startswith("Bearer "):
+            from app.auth import decode_token
+
+            claims = decode_token(authz[7:].strip())
+            if not claims:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Token tidak valid atau kadaluarsa."},
+                )
+            try:
+                tenant = TenantContext(
+                    institution_id=(
+                        UUID(claims["inst"]) if claims.get("inst") else None
+                    ),
+                    user_id=UUID(claims["sub"]) if claims.get("sub") else None,
+                    user_role=claims.get("role", "anonymous"),
+                    tier_level=claims.get("tier", "free"),
+                )
+                if tenant.user_role not in _ALLOWED_ROLES:
+                    raise ValueError("role")
+                request.state.tenant = tenant
+                return await call_next(request)
+            except (ValueError, KeyError):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Klaim token tidak valid."},
+                )
+
+        # --- Fallback dev (AUTH_DEV_HEADERS=true): header pengujian ---
+        from app.config import settings
+
+        if not settings.auth_dev_headers:
+            request.state.tenant = TenantContext()
+            return await call_next(request)
+
         raw_institution_id = request.headers.get("X-Institution-ID")
         raw_user_id = request.headers.get("X-User-ID")
         user_role = request.headers.get("X-User-Role", "anonymous")

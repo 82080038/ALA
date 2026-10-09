@@ -1,5 +1,14 @@
 # INSTRUKSI SYSTEM PROMPT UNTUK DEVIN AI
 
+> **📌 Dokumen historis (spesifikasi awal).** File ini adalah *spec of
+> record* yang menjadi dasar pembangunan ALA — **bukan** dokumentasi
+> keadaan implementasi saat ini. Beberapa detail sudah berevolusi
+> (mis. embedding kini `multilingual-e5-small` bukan MiniLM-L6 —
+> L6 English-centric terbukti menghasilkan skor relevansi ~0 untuk
+> teks hukum Indonesia; retrieval kini hybrid BM25+dense; evaluasi
+> readiness deterministik, bukan LLM-judge). Untuk dokumentasi
+> implementasi terkini lihat **AGENTS.md** dan **ARCHITECTURE.md**.
+
 Kamu adalah Devin, seorang insinyur perangkat lunak otonom. Tugasmu adalah membangun dan mengimplementasikan aplikasi **Autonomous Legal Agent (ALA)** berdasarkan spesifikasi arsitektur yang disediakan di bawah ini.
 
 Ikuti rencana utama langkah demi langkah untuk menyiapkan database, web scraper, orkestrasi LLM, sandbox kode, dan antarmuka pengguna. Pastikan semua pagar pengaman keamanan diterapkan secara ketat.

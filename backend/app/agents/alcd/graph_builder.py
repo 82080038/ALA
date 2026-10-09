@@ -86,6 +86,56 @@ def build_cross_references(driver, refs: list[dict]) -> int:
         return result.single()["n"]
 
 
+def link_law_relations(law_name: str, revokes: list[str],
+                       amends: list[str],
+                       amended_by: list[str] | None = None) -> int:
+    """Bangun node LegalDoc tingkat-undang-undang + edge REVOKES/AMENDS
+    (GLOBAL). Berbeda dengan CROSS_REFERENCES antar-pasal, relasi ini
+    menghubungkan dokumen secara utuh — dipakai audit temporal/status.
+    `amended_by` = UU lain yang mengubah DOKUMEN ini (arah terbalik)."""
+    amended_by = amended_by or []
+    if not revokes and not amends and not amended_by:
+        return 0
+    from app.database.neo4j import get_neo4j_driver
+
+    query = """
+    MERGE (a:LegalDoc {name: $law_name})
+    ON CREATE SET a.scope = 'GLOBAL'
+    WITH a
+    UNWIND $revokes AS t
+    MERGE (b:LegalDoc {name: t})
+    ON CREATE SET b.scope = 'GLOBAL'
+    MERGE (a)-[:REVOKES]->(b)
+    WITH a
+    UNWIND $amends AS t
+    MERGE (c:LegalDoc {name: t})
+    ON CREATE SET c.scope = 'GLOBAL'
+    MERGE (a)-[:AMENDS]->(c)
+    WITH a
+    UNWIND $amended_by AS t
+    MERGE (d:LegalDoc {name: t})
+    ON CREATE SET d.scope = 'GLOBAL'
+    MERGE (d)-[:AMENDS]->(a)
+    RETURN size($revokes) + size($amends) + size($amended_by) AS n
+    """
+    try:
+        driver = get_neo4j_driver()
+    except Exception as exc:
+        logger.warning("Neo4j tidak tersedia: %s", exc)
+        return 0
+    try:
+        with driver.session() as session:
+            return session.run(
+                query, law_name=law_name,
+                revokes=revokes, amends=amends,
+                amended_by=amended_by).single()["n"]
+    except Exception as exc:
+        logger.warning("Relasi UU %s gagal: %s", law_name, exc)
+        return 0
+    finally:
+        driver.close()
+
+
 def build_graph_for_document(law_name: str, articles: list[dict]) -> dict:
     """Pipeline penuh: node + cross-references untuk satu dokumen.
 

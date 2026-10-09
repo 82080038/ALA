@@ -13,6 +13,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger("ala.config")
 
+# Host shell dapat mengekspor DEBUG=release (non-boolean) — pydantic_settings
+# memprioritaskan env var atas .env dan akan menolak nilai itu. Normalisasi
+# sebelum Settings() diinstansiasi (pola yang sama dipakai tests/conftest.py).
+if os.environ.get("DEBUG", "").lower() not in {
+    "true", "false", "1", "0", "yes", "no", "on", "off",
+}:
+    os.environ["DEBUG"] = "false"
+
 
 # ---------------------------------------------------------------------------
 # Hardware Intelligence & Resource Optimizer (HIRO)
@@ -283,13 +291,40 @@ class Settings(BaseSettings):
     ollama_temperature_reasoning: float = 0.2
     ollama_temperature_coder: float = 0.1
 
+    # Embedding retrieval (ingest + query harus model yang sama).
+    # Default multilingual-e5-small (384-dim). Upgrade path
+    # (benchmark HuggingFace untuk Bahasa Indonesia):
+    #   - LazarusNLP/all-indo-e5-small-v4 : drop-in 384-dim, dilatih
+    #     khusus Indonesia — RECOMMENDED upgrade pertama.
+    #   - BAAI/bge-m3 (atau alphaedge-ai/bge-m3-ind-* yang dipangkas):
+    #     1024-dim, native dense+sparse, lebih kuat tapi lebih berat.
+    # WAJIB: ganti model = ruang vektor berubah → kosongkan koleksi
+    # Chroma `indonesian_laws` dan re-embed ulang seluruh korpus
+    # (jalankan bootstrap ALCD ulang). Mencampur vektor beda model
+    # merusak retrieval diam-diam.
+    embedding_model: str = "intfloat/multilingual-e5-small"
+
+    # Reranker cross-encoder lokal (zero-cost). Default multilingual-mMARCO
+    # MiniLM — layak di CPU. Upgrade ke BAAI/bge-reranker-v2-m3 (lebih kuat
+    # untuk Bahasa Indonesia) bila torch CUDA tersedia.
+    reranker_enabled: bool = True
+    reranker_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    reranker_top: int = 48
+    # Snapshot indeks BM25 ke disk — hindari rebuild penuh tiap cold-start
+    # (kritis saat korpus >100K chunk). Invalidasi otomatis via count koleksi
+    # + penghapusan eksplisit setelah ingest.
+    bm25_index_path: str = str(Path.home() / ".chroma" / "bm25_index.pkl")
+
     # Google Custom Search (opsional — discovery dokumen publik ALCD/crawler)
     google_cse_id: str = ""
     google_cse_api_key: str = ""
 
-    # JWT
+    # JWT — HS256 lokal, zero-cost (tanpa provider eksternal)
     jwt_secret: str = "change_me"
     jwt_expiry_hours: int = 24
+    # Fallback header X-User-Role/X-Institution-ID untuk pengembangan
+    # lokal standalone. WAJIB false di deployment nyata.
+    auth_dev_headers: bool = True
 
     # ALCD
     alcd_enabled: bool = True
@@ -299,6 +334,16 @@ class Settings(BaseSettings):
     alcd_max_concurrent_crawls: int = 3
     alcd_trusted_domains: str = "jdih.kemenkumham.go.id,peraturan.bpk.go.id,putusan3.mahkamahagung.go.id"
     alcd_crawl_rate_limit: int = 1
+    # OCR fallback untuk PDF scan tanpa text-layer (UU 1/2023 dsb.) —
+    # butuh ocrmypdf + tesseract bahasa 'ind' terpasang di host.
+    alcd_ocr_enabled: bool = True
+    # Serap korpus yang sudah diverifikasi proyek lain (SPKT sqlite,
+    # LexisAI chroma) sebagai saluran akuisisi — path via env
+    # SPKT_DB_PATH / LEXISAI_CHROMA_PATH.
+    alcd_import_external: bool = True
+    # Doktrin fondasi ilmu hukum (asas, teori, metode) digenerate LLM
+    # sebagai lapisan konseptual — ditandai kategori 'doktrin'.
+    alcd_doctrine_enabled: bool = True
 
     # App
     app_host: str = "0.0.0.0"

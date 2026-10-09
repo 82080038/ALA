@@ -31,14 +31,16 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 | 1.2 | Setup Python environment | `backend/requirements.txt`, virtual environment | ✅ Done |
 | 1.3 | Desain skema PostgreSQL | Tabel `users`, `cases`, `ai_audit_logs`, `knowledge_registry`, `ontology_nodes`, `self_eval_logs` | ✅ Done |
 | 1.4 | Script inisialisasi DB | `backend/scripts/init_db.py` — tabel kosong saja, TANPA data | ✅ Done |
-| 1.5 | ALCD: Ontology Generator | `backend/app/agents/alcd/ontology_generator.py` — AI merumuskan knowledge tree dari core objective | ⬜ Pending |
-| 1.6 | ALCD: Source Discoverer | `backend/app/agents/alcd/source_discoverer.py` — Temukan repositori hukum resmi via Google Search | ⬜ Pending |
-| 1.7 | ALCD: Document Parser | `backend/app/agents/alcd/document_parser.py` — Download, parse HTML/PDF, ekstrak konten terstruktur | ⬜ Pending |
-| 1.8 | ALCD: Autonomous Ingestor | `backend/app/agents/alcd/autonomous_ingestor.py` — Chunk, embed, simpan ke ChromaDB | ⬜ Pending |
-| 1.9 | ALCD: Graph Builder | `backend/app/agents/alcd/graph_builder.py` — Identifikasi cross-references, bangun relasi di Neo4j | ⬜ Pending |
-| 1.10 | ALCD: Self-Evaluator | `backend/app/agents/evaluator.py` — Generate quiz, skor jawaban, deteksi gap, re-research | ⬜ Pending |
-| 1.11 | ALCD: Curriculum Agent | `backend/app/agents/curriculum_designer.py` — Orchestrate full pipeline (Agent 0) | ⬜ Pending |
-| 1.12 | Bootstrap Test | ALCD berhasil bootstrap dari nol: ontology → discover → ingest → self-eval | ⬜ Pending |
+| 1.5 | ALCD: Ontology Generator | `backend/app/agents/alcd/ontology_generator.py` — AI merumuskan knowledge tree dari core objective | ✅ Done |
+| 1.6 | ALCD: Source Discoverer | `backend/app/agents/alcd/source_discoverer.py` — CSE→DDG→BPK fallback + circuit breaker | ✅ Done |
+| 1.7 | ALCD: Document Parser | `backend/app/agents/alcd/document_parser.py` — HTML/PDF/OCR, hierarki Bab→Bagian→Paragraf→Pasal | ✅ Done |
+| 1.8 | ALCD: Autonomous Ingestor | `backend/app/agents/alcd/autonomous_ingestor.py` — Chunk 500/50, E5 embed, ChromaDB GLOBAL upsert | ✅ Done |
+| 1.9 | ALCD: Graph Builder | `backend/app/agents/alcd/graph_builder.py` — `LegalArticle` + `CROSS_REFERENCES` di Neo4j | ✅ Done |
+| 1.10 | ALCD: Self-Evaluator | `backend/app/agents/evaluator.py` — deterministik (registry ∩ kanonik) + `scripts/eval_gold.py` (P@k/MRR gold) | ✅ Done |
+| 1.11 | ALCD: Curriculum Agent | `backend/app/agents/curriculum_designer.py` — pipeline: ontologi → doktrin → korpus terverifikasi → crawl celah → evaluasi | ✅ Done |
+| 1.12 | Bootstrap Test | Bootstrap dari nol terverifikasi: 163 dokumen, 16.757 chunk, skor 0.916 (Okt 2026) | ✅ Done |
+| 1.13 | Doctrine Foundation | `alcd/doctrine.py` — 21 konsep ilmu hukum berjenjang, kategori `doktrin` | ✅ Done |
+| 1.14 | External Corpus Importer | `alcd/external_corpus.py` — `spkt://` `lexisai://` `aph://` `hf://laws` `hf://putusan`, idempotent | ✅ Done |
 
 ### Kriteria Keberhasilan
 - ✅ Docker Compose berjalan stabil dengan semua 3 database services
@@ -57,14 +59,14 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 
 | # | Task | Deliverable | Status |
 |---|------|-------------|--------|
-| 2.1 | Setup LangGraph state machine | `backend/app/agents/legal_orchestrator.py` dengan 4 agen (ALCD → Legal → Crawl → Synth) | ⬜ Pending |
-| 2.2 | ALCD readiness check per query | Agent 0 memeriksa `knowledge_score ≥ threshold` sebelum memproses query | ⬜ Pending |
-| 2.3 | Legal Foundation Agent (Agent 1) | `backend/app/agents/legal_foundation.py` — RAG terhadap DB yang dipopulasi ALCD + Neo4j cross-ref | ⬜ Pending |
-| 2.4 | Internet Crawler Agent (Agent 2) | `backend/app/agents/internet_crawler.py` — Universal crime trend discovery | ⬜ Pending |
-| 2.5 | Synthesis & Developer Agent (Agent 3) | `backend/app/agents/code_generator.py` — Sintesis hukum↔realitas + code generation | ⬜ Pending |
-| 2.6 | Integrasi LLM Provider | Ollama lokal: `qwen2.5:3b-instruct` (reasoning) + `qwen2.5-coder:3b` (codegen) via `ChatOllama` | ⬜ Pending |
-| 2.7 | FastAPI basic endpoints | `backend/main.py`, routes `/api/v1/analyze-trend`, `/api/v1/alcd/*` | ⬜ Pending |
-| 2.8 | End-to-end test pipeline | Query → ALCD check → Legal Foundation → Crawl → Synthesize + Generate | ⬜ Pending |
+| 2.1 | Setup LangGraph state machine | `backend/app/agents/legal_orchestrator.py` dengan 4 agen (ALCD → Legal → Crawl → Synth) | ✅ Done |
+| 2.2 | ALCD readiness check per query | Agent 0 memeriksa `knowledge_score ≥ threshold` sebelum memproses query | ✅ Done |
+| 2.3 | Legal Foundation Agent (Agent 1) | `legal_foundation.py` — **hybrid** E5-dense ∪ BM25 → RRF + feedback boost + abstention + audit sitasi 3 sumbu | ✅ Done |
+| 2.4 | Internet Crawler Agent (Agent 2) | `backend/app/agents/internet_crawler.py` — Universal crime trend discovery | ✅ Done |
+| 2.5 | Synthesis & Developer Agent (Agent 3) | `backend/app/agents/code_generator.py` — Sintesis hukum↔realitas + code generation | ✅ Done |
+| 2.6 | Integrasi LLM Provider | Ollama lokal: `qwen2.5:3b-instruct` (GPU 0) + `qwen2.5-coder:3b` (GPU 1) dual-instance | ✅ Done |
+| 2.7 | FastAPI basic endpoints | `backend/main.py`, routes `/api/v1/analyze-trend`, `/api/v1/alcd/*` (+`progress` feed) | ✅ Done |
+| 2.8 | End-to-end test pipeline | Query → ALCD check → Legal Foundation → Crawl → Synthesize + Generate | ✅ Done |
 
 ### Kriteria Keberhasilan
 - ✅ Pipeline ALCD + law-first end-to-end berjalan: ALCD check → legal foundation → crawl → synthesis + kode
@@ -83,13 +85,13 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 
 | # | Task | Deliverable | Status |
 |---|------|-------------|--------|
-| 3.1 | Desain graph schema Neo4j | Node & relationship types, Cypher queries | ⬜ Pending |
-| 3.2 | Verifikasi graph ALCD | Validasi cross-references yang dibangun ALCD di Neo4j | ⬜ Pending |
-| 3.3 | Integrasi Neo4j ke Legal Agent | Query graph untuk cross-references dalam analisis | ⬜ Pending |
-| 3.4 | Docker Sandbox setup | `sandbox/Dockerfile` (image terkunci), `backend/app/sandbox/execution_env.py` | ⬜ Pending |
-| 3.5 | Guardrail Filter | `backend/app/sandbox/guardrails.py` — malicious pattern scanner | ⬜ Pending |
-| 3.6 | Approval workflow endpoint | `POST /api/v1/approve-workflow` + audit logging | ⬜ Pending |
-| 3.7 | Unit & integration tests | `tests/` — coverage minimal 70% | ⬜ Pending |
+| 3.1 | Desain graph schema Neo4j | Node `LegalArticle` + rel `CROSS_REFERENCES` | ✅ Done |
+| 3.2 | Verifikasi graph ALCD | 8.592 node / 3.661 edge rujukan nyata terverifikasi | ✅ Done |
+| 3.3 | Integrasi Neo4j ke Legal Agent | Query graph untuk cross-references dalam analisis | ✅ Done |
+| 3.4 | Docker Sandbox setup | `sandbox/Dockerfile` (image terkunci), `backend/app/sandbox/execution_env.py` | ✅ Done |
+| 3.5 | Guardrail Filter | `backend/app/sandbox/guardrails.py` — malicious pattern scanner | ✅ Done |
+| 3.6 | Approval workflow endpoint | `POST /api/v1/approve-workflow` + audit logging | ✅ Done |
+| 3.7 | Unit & integration tests | `tests/` — 26 pass, 3 skip | ✅ Done |
 
 ### Kriteria Keberhasilan
 - ✅ Neo4j graph berisi minimal 50 relasi cross-reference antar pasal
@@ -107,13 +109,13 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 
 | # | Task | Deliverable | Status |
 |---|------|-------------|--------|
-| 4.1 | Dashboard UI | `frontend/` — Next.js 14 + TypeScript + Tailwind CSS + shadcn/ui | 🚧 Scaffold |
-| 4.2 | Visualisasi tren kejahatan | Crime trend cards dengan sumber & waktu deteksi | ⬜ Pending |
-| 4.3 | Tampilan pasal hukum | List pasal relevan dengan highlight & snippet | ⬜ Pending |
-| 4.4 | Visualisasi flowchart | Mermaid.js rendering untuk workflow | ⬜ Pending |
-| 4.5 | Code viewer & download | Syntax-highlighted code + tombol download/execute | ⬜ Pending |
-| 4.6 | Human-in-the-Loop UI | Tombol Approve / Reject dengan konfirmasi | ⬜ Pending |
-| 4.7 | Audit log viewer | Tabel history semua aktivitas AI | ⬜ Pending |
+| 4.1 | Dashboard UI | `frontend/` — Next.js + TypeScript + Tailwind; canvas "otak" live (kamera fokus ke wilayah yang diproses, pulsa data nyata, neural.log) | ✅ Done |
+| 4.2 | Visualisasi tren kejahatan | Crime trend cards dengan sumber & waktu deteksi | ✅ Done |
+| 4.3 | Tampilan pasal hukum | List pasal relevan dengan highlight & snippet | ✅ Done |
+| 4.4 | Visualisasi flowchart | Mermaid.js rendering untuk workflow | ✅ Done |
+| 4.5 | Code viewer & download | Syntax-highlighted code + tombol download/execute | ✅ Done |
+| 4.6 | Human-in-the-Loop UI | Tombol Approve / Reject dengan konfirmasi | ✅ Done |
+| 4.7 | Audit log viewer | Tabel history semua aktivitas AI | ✅ Done |
 | 4.8 | Pilot testing | Test dengan 3–5 personel dari berbagai unit APH (Reskrim, Tipikor, Cyber, Narkoba) | ⬜ Pending |
 
 ### Kriteria Keberhasilan
@@ -178,3 +180,26 @@ Fase 1 (Infra + ALCD Module)
 - Timeline bersifat estimasi dan dapat disesuaikan berdasarkan ketersediaan sumber daya
 - Setiap fase diakhiri dengan **review meeting** sebelum lanjut ke fase berikutnya
 - Dokumentasi diupdate secara inkremental sepanjang pengembangan
+
+### Adopsi eksternal (riset GitHub/HuggingFace — Okt 2026)
+
+Diimplementasikan pada Fase 1–2 di luar rencana awal, menutup gap yang
+terukur. Detail lengkap di AGENTS.md §10:
+
+- **Korpus HuggingFace** — `endomorphosis/ipfs_indonesia_laws` (1.924
+  UU / 105K pasal JDIH BPK) dan `Azzindani/ID_Supreme_Court_Parquet`
+  (22.630 putusan MA pidana terstruktur) menjadi saluran impor
+  `hf://` di `external_corpus.py`. Dedupe identitas; `law_status`
+  → `source_status` untuk audit temporal.
+- **Gold benchmark** — `backend/scripts/eval_gold.py` mengukur
+  HitRate@k/MRR terhadap `tests/gold/*.jsonl` (15 pasangan curated +
+  400 QA `horelulus/ID_REG_QA_Small`). Menggantikan self-eval
+  LLM-menilai-dirinya-sendiri dengan metrik pasal-gold deterministik.
+- **Grounding di kode** — `_audit_citations` 3 sumbu (eksistensi,
+  fidelity, temporal-anakronisme) + abstention saat bukti lemah atau
+  sitasi ungrounded (pola `legal-agent`/`regulated-rag`/`policyproof`).
+- **Hierarki pasal** — parser melacak BAB/Bagian/Paragraf dan
+  meng-anchor path ke tiap chunk (pola `pengurai-regulasi` +
+  `ID_REG_MD_RAG`).
+- **Embedding configurable** — `settings.embedding_model`; jalur
+  upgrade terdokumentasi ke e5-indo / BGE-M3-ind (wajib re-embed).

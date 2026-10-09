@@ -25,9 +25,45 @@ Semua endpoint (kecuali `/health`) memerlukan autentikasi via **Bearer Token** d
 Authorization: Bearer <token>
 ```
 
-Token diperoleh melalui endpoint login. Role-Based Access Control (RBAC) diterapkan berdasarkan role user: `super_admin`, `admin_instansi`, `penyidik`, `jaksa`, `hakim` (lihat `SECURITY.md` §2.2 untuk permission matrix lengkap).
+Token diperoleh melalui `POST /api/v1/auth/login` (JWT HS256 lokal — tanpa layanan eksternal). RBAC diterapkan berdasarkan role user: `super_admin`, `admin_instansi`, `penyidik`, `jaksa`, `hakim` (lihat `SECURITY.md` §2.2 untuk permission matrix lengkap).
 
-> **Catatan Fase 1:** JWT belum diimplementasi. Middleware tenant (`backend/app/middleware/tenant.py`) sementara membaca konteks dari header `X-Institution-ID`, `X-User-ID`, `X-User-Role`, `X-Tier-Level` untuk pengujian.
+> **Fallback dev:** middleware juga membaca header `X-Institution-ID`, `X-User-ID`, `X-User-Role`, `X-Tier-Level` **hanya bila `AUTH_DEV_HEADERS=true`** (default aktif untuk standalone lokal; wajib `false` di deployment nyata). Token Bearer selalu diutamakan bila dikirim.
+
+---
+
+### 0. Login — Terbitkan JWT
+
+```
+POST /api/v1/auth/login
+```
+
+**Body:**
+```json
+{ "email": "admin@ala.local", "password": "..." }
+```
+
+**Response `200`:**
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIs...",
+  "token_type": "bearer",
+  "expires_in_hours": 24,
+  "user": { "id": "…", "name": "Super Admin", "role": "super_admin",
+            "tier": "premium_l2", "institution_id": "…" }
+}
+```
+
+**Error:** `401` email/password salah (pesan generik — tidak membocorkan akun terdaftar). Rate-limited 10/menit/IP.
+
+Akun pertama dibuat via `scripts/seed_admin.py` (idempotent, password acak dicetak sekali atau dari `ALA_ADMIN_PASSWORD`). Pengguna selanjutnya via `POST /api/v1/admin/users` (super_admin).
+
+### 0a. Audit Chain Verification
+
+```
+GET /api/v1/audit-logs/verify    (super_admin)
+```
+
+**Response:** `{ "valid": true, "entries_checked": 12, "broken_at": null }` — memverifikasi hash-chain `prev_hash`/`entry_hash` di `ai_audit_logs`; `broken_at` menunjuk baris yang dimanipulasi.
 
 ---
 
@@ -60,99 +96,100 @@ GET /health
 
 ---
 
-### 2. Analisis Tren Kejahatan
+### 2. Analisis Tren Kejahatan (async job)
 
 ```
 POST /api/v1/analyze-trend
 ```
 
-**Deskripsi:** Memicu pipeline LangGraph **law-first** untuk menganalisis tren kejahatan berdasarkan query pengguna. Pipeline dimulai dengan penguasaan hukum, lalu crawling internet untuk tren kejahatan universal, dan terakhir sintesis + generasi kode.
+**Deskripsi:** Mengantrekan pipeline LangGraph **law-first** sebagai job background. Mengembalikan `request_id` seketika — progres tiap agen dipantau via `GET /api/v1/analyze-trend/{request_id}` atau `GET /api/v1/activity`. `X-Institution-ID` wajib dan harus institusi terdaftar (baris audit butuh tenant valid).
 
 **Request Body:**
 ```json
 {
   "query": "modus pencucian uang melalui cryptocurrency",
-  "max_sources": 10,
-  "include_code_generation": true
+  "case_id": null
 }
 ```
 
 | Field | Type | Required | Default | Deskripsi |
 |-------|------|----------|---------|-----------|
-| `query` | `string` | ✅ | — | Query analisis dalam Bahasa Indonesia |
-| `max_sources` | `integer` | ❌ | `10` | Jumlah maksimal sumber internet yang dicrawl |
-| `include_code_generation` | `boolean` | ❌ | `true` | Apakah Developer Agent generate kode utilitas |
+| `query` | `string` | ✅ | — | Query analisis dalam Bahasa Indonesia (3–4000 char) |
+| `case_id` | `string (uuid)` | ❌ | `null` | Kaitkan hasil ke kasus tertentu |
 
-**Response `200 OK`:**
+**Response `202 Accepted`:**
 ```json
 {
   "request_id": "uuid-v4",
-  "legal_foundation": {
-    "articles": [
-      {
-        "law_name": "UU TPPU",
-        "article_number": "Pasal 3",
-        "title": "Pencucian Uang",
-        "content": "Setiap Orang yang menempatkan, mentransfer...",
-        "relevance_score": 0.96
-      },
-      {
-        "law_name": "KUHP",
-        "article_number": "Pasal 55",
-        "title": "Penyertaan",
-        "content": "...",
-        "relevance_score": 0.81
-      }
-    ],
-    "cross_references": [
-      {
-        "from": "UU TPPU Pasal 3",
-        "to": "KUHP Pasal 55",
-        "relationship": "CROSS_REFERENCES"
-      }
-    ],
-    "legal_summary": "Modus pencucian uang via cryptocurrency dapat dijerat UU TPPU Pasal 3..."
-  },
-  "crime_trend": {
-    "name": "Pencucian Uang via Cryptocurrency",
-    "description": "Skema pencucian uang hasil korupsi menggunakan aset kripto lintas negara...",
-    "sources": [
-      {
-        "title": "KPK Ungkap Modus Baru Pencucian Uang via Aset Kripto",
-        "url": "https://example.com/article",
-        "published_date": "2026-09-15",
-        "snippet": "..."
-      }
-    ]
-  },
-  "synthesis": {
-    "law_reality_mapping": "UU TPPU Pasal 3 dapat diterapkan pada skema crypto laundering...",
-    "regulatory_gaps": "Belum ada regulasi spesifik untuk DeFi mixing services...",
-    "enforcement_strategy": "Gunakan pendekatan follow-the-money dengan PPATK..."
-  },
-  "generated_code": {
-    "filename": "crypto_transaction_analyzer.py",
-    "language": "python",
-    "description": "Script untuk analisis transaksi cryptocurrency mencurigakan",
-    "code": "import re\nimport json\n...",
-    "requires_approval": true
-  },
-  "flowchart": "graph TD\n  A[Identifikasi Wallet] --> B[Trace Transaksi]\n  B --> C[Analisis Pattern]\n  ...",
-  "audit_id": "uuid-v4"
+  "status": "queued"
 }
 ```
 
-**Response `422 Validation Error`:**
+**Error:** `400` jika `X-Institution-ID` kosong / bukan institusi terdaftar; `401` tanpa `X-User-Role`.
+
+### 2a. Status Job Pipeline
+
+```
+GET /api/v1/analyze-trend/{request_id}
+```
+
+**Response `200` (berjalan):**
 ```json
 {
-  "detail": [
-    {
-      "loc": ["body", "query"],
-      "msg": "field required",
-      "type": "value_error.missing"
-    }
-  ]
+  "request_id": "uuid-v4",
+  "kind": "analyze",
+  "query": "modus pencucian uang...",
+  "status": "running",
+  "stages_completed": ["alcd", "legal_foundation"],
+  "pipeline_stages": ["alcd", "legal_foundation", "internet_crawler", "synthesis_developer"],
+  "stage_labels": {"alcd": "Agent 0 — ALCD: ...", "...": "..."},
+  "started_at": 1759999999.0,
+  "finished_at": null,
+  "error": null
 }
+```
+
+**Response `200` (selesai)** — sama, plus `status: "done"` dan field `result`:
+```json
+{
+  "result": {
+    "request_id": "uuid-v4",
+    "knowledge_ready": true,
+    "knowledge_score": 0.97,
+    "legal_summary": "...",
+    "legal_articles": [{"law_name": "UU TPPU", "article_number": "Pasal 3", "relevance_score": 0.96}],
+    "cross_references": [{"from_article": "...", "to_article": "...", "relationship": "CROSS_REFERENCES"}],
+    "crime_summary": "...",
+    "crime_data": [{"title": "...", "url": "...", "snippet": "..."}],
+    "synthesis": {"gaps": ["..."], "strategy": "..."},
+    "generated_output": {"filename": "utility.py", "code": "...", "flowchart": "...", "syntax_valid": true},
+    "errors": [],
+    "requires_approval": true
+  }
+}
+```
+
+`status: "failed"` disertai `error`. Job tenant lain → `404` (tidak bisa di-probe). Registry in-memory — job hilang saat restart API; jejak permanen tetap di `ai_audit_logs`.
+
+### 2b. Aktivitas Real-Time
+
+```
+GET /api/v1/activity
+```
+
+**Deskripsi:** Daftar job tenant ini (super_admin: semua tenant) — yang sedang berjalan dulu, lalu riwayat terbaru (maks 20).
+
+---
+
+### 2c. Daftar Institusi (untuk pemilih identitas)
+
+```
+GET /api/v1/institutions
+```
+
+**Response `200`:**
+```json
+{"institutions": [{"id": "uuid", "name": "POLRI", "type": "kepolisian"}]}
 ```
 
 ---
@@ -397,38 +434,76 @@ GET /api/v1/alcd/status
 
 ---
 
-### 9. ALCD — Trigger Learning
+### 9. ALCD — Trigger Learning (async job)
 
 ```
 POST /api/v1/alcd/trigger
 ```
 
-**Deskripsi:** Memicu ALCD untuk menjalankan siklus pembelajaran (ontology → acquisition → self-evaluation) secara on-demand.
+**Deskripsi:** Mengantrekan siklus pembelajaran ALCD (ontology → acquisition → self-evaluation) sebagai job background — proses bisa bermenit-menit. Pantau via `GET /api/v1/analyze-trend/{request_id}` atau `GET /api/v1/activity`.
 
-**Auth:** `super_admin` only
+**Auth:** role apapun yang terautentikasi (bukan anonymous)
 
-**Request Body:**
-```json
-{
-  "mode": "full",
-  "focus_categories": []
-}
-```
-
-| Field | Type | Deskripsi |
-|-------|------|-----------|
-| `mode` | `string` | `full` (bootstrap penuh), `incremental` (hanya gap), `evaluate_only` (hanya evaluasi) |
-| `focus_categories` | `string[]` | Opsional. Fokus pada kategori tertentu, misal `["yurisprudensi"]` |
+**Request Body:** tidak ada
 
 **Response `202 Accepted`:**
 ```json
 {
-  "task_id": "uuid-v4",
-  "status": "started",
-  "mode": "full",
-  "message": "ALCD learning cycle initiated. Monitor progress via GET /api/v1/alcd/status."
+  "request_id": "uuid-v4",
+  "status": "queued"
 }
 ```
+
+**Error:** `409` jika bootstrap lain sedang berjalan (anti double-run).
+
+---
+
+### 9a. ALCD — Progress Live & Feed Pengetahuan
+
+```
+GET /api/v1/alcd/progress
+```
+
+**Deskripsi:** Progres real-time bootstrap ALCD — tahap yang sedang
+dikerjakan beserta hitungan nyata, plus feed pengetahuan untuk panel
+"ISI OTAK" frontend. Semua nilai berasal dari pipeline backend; tidak
+ada data rekaan.
+
+**Auth:** publik (namespace GLOBAL)
+
+**Response `200 OK`:**
+```json
+{
+  "stage": "import",
+  "topic": "Korpus JDIH BPK (HF)",
+  "detail": "20/2025 · 809 pasal",
+  "running": true,
+  "done": 3,
+  "total": 47,
+  "elapsed_s": 55,
+  "eta_s": 810,
+  "recent": [
+    {"name": "UU Nomor 1 Tahun 2026 tentang KUHP", "articles": 85,
+     "chunks": 246, "cat": "materiil", "ts": "2026-10-10T01:58:00Z"}
+  ],
+  "queue": [
+    {"topic": "Doktrin & Asas Hukum", "status": "gap_detected",
+     "score": 0.0}
+  ]
+}
+```
+
+| Field | Deskripsi |
+|-------|-----------|
+| `stage` | Tahap pipeline: `ontology`, `doktrin`, `acquire`, `scan`, `fetch`, `parse`, `ingest`, `graph`, `import`, `evaluate`, `done` |
+| `topic` | Topik/wilayah ontologi atau korpus yang sedang diproses |
+| `detail` | Detail kerja (nama file, dokumen, jumlah pasal) |
+| `running` | `true` saat bootstrap aktif |
+| `done`/`total` | Kemajuan bernilai — `null` bila belum bisa dihitung |
+| `elapsed_s` | Detik berjalan pada tahap ini |
+| `eta_s` | Estimasi sisa detik — `null` bila belum bisa diestimasi |
+| `recent` | 5 dokumen terakhir yang berhasil ditanam (BARU DIPELAJARI) |
+| `queue` | Node ontologi berikutnya (RENCANA BERIKUTNYA) |
 
 ---
 
@@ -531,17 +606,16 @@ Semua endpoint menggunakan format error standar:
 
 ## Rate Limiting
 
+Diterapkan di `app/middleware/ratelimit.py` — sliding window in-memory per (IP, endpoint). Respons `429` + header `Retry-After`.
+
 | Endpoint | Limit |
 |----------|-------|
-| `/api/analyze-trend` | 10 requests / menit / user |
-| `/api/approve-workflow` | 30 requests / menit / user |
-| `/api/cases` | 60 requests / menit / user |
-| `/api/audit-logs` | 60 requests / menit / user |
-| `/api/graph/query` | 30 requests / menit / user |
-| `/api/alcd/status` | 60 requests / menit / user |
-| `/api/alcd/trigger` | 1 request / jam / user |
-| `/api/alcd/ontology` | 30 requests / menit / user |
-| `/api/alcd/gaps` | 30 requests / menit / user |
+| `/api/v1/auth/login` | 10 / menit / IP (anti brute-force) |
+| `/api/v1/analyze-trend` | 10 / menit / IP |
+| `/api/v1/approve-workflow` | 20 / menit / IP |
+| `/api/v1/alcd/trigger` | 3 / 5 menit / IP |
+
+Endpoint lain saat ini tidak dibatasi (lokal standalone). Tambahkan aturan di `_RULES` bila dibutuhkan; untuk multi-node ganti penyimpanan ke Redis.
 
 ---
 

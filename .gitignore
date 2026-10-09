@@ -44,3 +44,15 @@ coverage/
 # Logs
 *.log
 ala-data-backup*.tar.gz
+
+# Local native runtime data (non-docker)
+.pgdata/
+.chroma/
+.neo4j/
+.env.runtime
+
+# Korpus HuggingFace (parquet cache — diunduh ulang otomatis)
+backend/data/hf/
+
+# TypeScript incremental build cache
+tsconfig.tsbuildinfo

@@ -7,6 +7,38 @@
 
 ## [Unreleased]
 
+### Added — Keamanan nyata, integritas audit & kualitas retrieval (Okt 2026)
+- **Autentikasi JWT sungguhan** — `app/auth.py` (HS256 via python-jose + `bcrypt` langsung; passlib dibypass karena tidak kompatibel bcrypt ≥4.x). `POST /api/v1/auth/login` menerbitkan token dari `users.password_hash`; middleware `tenant.py` memprioritaskan `Authorization: Bearer` — header `X-User-Role` dsb. kini **hanya** fallback dev di balik `AUTH_DEV_HEADERS` (wajib `false` produksi)
+- **Manajemen akun** — `POST /api/v1/admin/users` (super_admin, bcrypt) + `scripts/seed_admin.py` (bootstrap super_admin pertama; password acak dicetak sekali atau via `ALA_ADMIN_PASSWORD`)
+- **Rate limiting** — `app/middleware/ratelimit.py`: sliding window per-IP pada login (10/mnt), analyze-trend (10/mnt), approve-workflow (20/mnt), alcd/trigger (3/5mnt); `429`+`Retry-After`
+- **Audit hash-chain** — `app/audit.py`: tiap baris `ai_audit_logs` membawa `prev_hash`+`entry_hash` (SHA-256) → tamper-evident; `GET /api/v1/audit-logs/verify` memverifikasi rantai (super_admin); kolom migrasi idempotent di `init_db.py`
+- **Boost deterministik retrieval** — `legal_foundation._mention_boosts`: UU/Pasal yang disebut eksplisit di query (regex `UU No X Tahun Y`, `X/YYYY`, alias KUHAP/KUHP/Tipikor/ITE/dsb.) mendapat boost RRF. Terukur: **HitRate@10 0.200→0.467**, covered P@10 0.25→0.545 pada gold benchmark
+- **Reranker cross-encoder lokal** — `legal_foundation._rerank`: `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (lazy singleton, CPU-viable, ~1s/48 kandidat, zero-cost) mengurutkan ulang top-`RERANKER_TOP` hasil RRF; skor reranker hanya menentukan urutan (relevance_score tetap cosine dense → semantik abstention tak berubah); env `RERANKER_ENABLED/MODEL` — upgrade `BAAI/bge-reranker-v2-m3` bila torch CUDA. Terukur: **MRR@10 0.244→0.400**
+- **Persistensi indeks BM25** — snapshot pickle atomik ke `BM25_INDEX_PATH` (default `~/.chroma/bm25_index.pkl`); cold-start memuat snapshot (bukan rebuild atas >100K chunk); invalidasi otomatis saat `count` koleksi berubah + eksplisit via `invalidate_lexical_index()` setelah tiap upsert ingestor; lock thread-safe
+- **Relasi amandemen** — `external_corpus._extract_law_relations` mengekstrak klausul `mencabut/dicabut/mengubah/diubah dengan` per-kalimat (bukan window bebas → tanpa false positive); `graph_builder.link_law_relations` membuat node `LegalDoc` + edge `REVOKES`/`AMENDS` (arah `amended_by` ditangani terbalik)
+- **`/alcd/trigger` dibatasi** — hanya `super_admin`/`admin_instansi` (bootstrap mahal)
+
+### Fixed
+- `middleware/tenant.py` — sebelumnya siapapun bisa mengaku `X-User-Role: super_admin`; kini header hanya aktif di mode dev
+- `external_corpus.py` — false positive relasi amandemen dari window karakter lintas-kalimat → pencocokan tingkat kalimat
+- `audit.py` — digest hash-chain dinormalisasi ke UTC: `timestamptz` dibaca ulang dengan offset sesi (+07:00) memutus rantai palsu
+- `legal_foundation._log_retrieval` — `CREATE TABLE` di runtime gagal diam-diam (role `ala_app` tanpa privilege CREATE) → `retrieval_feedback` selalu kosong; DDL kini hanya milik `init_db.py`
+
+### Added — Adopsi korpus & evaluasi eksternal (riset GitHub/HuggingFace, Okt 2026)
+- **Importer `hf://`** di `alcd/external_corpus.py` — dua dataset HuggingFace sebagai saluran akuisisi terverifikasi: `endomorphosis/ipfs_indonesia_laws` (1.924 UU / 105.645 pasal ter-split dari JDIH BPK, `law_status`→`source_status` untuk audit temporal; prioritas UU pidana/acara/APH) dan `Azzindani/ID_Supreme_Court_Parquet` (22.630 putusan MA pidana terstruktur: kepala/dakwaan/tuntutan/fakta/amar → kategori `yurisprudensi`; `HF_PUTUSAN_MAX`, ≤0 nonaktif). Cache parquet di `backend/data/hf/` (gitignored)
+- **Importer `aph://`** — 30 dokumen riset domain APH terkurasi (alur SPP, nomenklatur, state machine, matriks uji) sebagai kategori `doktrin` — pengetahuan aplikatif, bukan teks primer
+- **Gold benchmark** `scripts/eval_gold.py` — HitRate@k/MRR terhadap `tests/gold/*.jsonl` (15 pasangan `ala_curated` dipetakan manual + 400 QA `ID_REG_QA_Small`); self-eval kini punya referensi gold deterministik, bukan hanya LLM-as-judge. Baseline: P@10 ≈ 0.20
+- **Audit sitasi 3 sumbu** — `_audit_citations` menambah sumbu TEMPORAL: pasal dari UU yang berlaku setelah tahun peristiwa di query → peringatan anakronisme
+- **Abstention** — `legal_foundation` menolak menjawab (`⌀ ABSTAIN` + `audit.abstained`) jika nol pasal, skor teratas <0.55, atau semua sitasi di luar set retrieval (pola grounded-refusal regulated-rag/policyproof)
+- **Hierarki pasal** — `document_parser` melacak BAB/Bagian/Paragraf per posisi; setiap pasal membawa `hierarchy` yang di-anchor ke isi chunk (`[BAB II · Bagian Kesatu]`) sehingga chunk tidak yatim konteks
+- **Embedding configurable** — `settings.embedding_model` (`EMBEDDING_MODEL`); jalur upgrade terdokumentasi (e5-indo 384-dim drop-in → BGE-M3-ind); ganti model mewajibkan re-embed
+- **Dependensi** — `pyarrow` (parquet HF)
+
+### Fixed — ditemukan saat pengujian importer baru
+- `external_corpus.py` — putusan MK SPKT terimpor duplikat tiap bootstrap (dedupe (nomor,tahun) tak menangkap law_number=None) → dedupe `source_url` `spkt://...#mk-*`
+- `external_corpus.py` — baris pasal duplikat di parquet HF → dedupe `article_number` per dokumen (sebelumnya ID chunk bentrok di upsert)
+- `autonomous_ingestor.py` — `law_name` >255 char (judul panjang UU 1/2026) → truncate ke VARCHAR(255)
+
 ### Added — Implementasi Fase 2 & 3 (diverifikasi live di Docker + dual-GPU Ollama)
 - **Pipeline 4 agen penuh** — `legal_orchestrator.py` (LangGraph `StateGraph(ALA_State)`), `curriculum_designer.py` (Agent 0: ontologi→discover→parse→ingest→graph→self-eval), `legal_foundation.py` (Agent 1: RAG ChromaDB GLOBAL + xref Neo4j), `internet_crawler.py` (Agent 2: Google CSE → Google News RSS fallback, Playwright→httpx), `code_generator.py` (Agent 3: sintesis + codegen dengan `CUSTODY_SCAFFOLD` wajib)
 - **Sub-modul ALCD** — `alcd/ontology_generator.py`, `source_discoverer.py` (CSE→DDG→BPK fallback + circuit breaker), `document_parser.py` (HTML/PDF→pasal, retry 403-backoff), `autonomous_ingestor.py` (chunk 500/50→embed→ChromaDB GLOBAL upsert), `graph_builder.py` (node `LegalArticle` + `CROSS_REFERENCES`), `evaluator.py` (self-quiz + LLM-as-judge + klasterisasi fitur→tier)

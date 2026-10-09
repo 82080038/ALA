@@ -44,6 +44,14 @@ def _knowledge_gate(state: ALA_State) -> str:
     return "legal_foundation"
 
 
+def _mode_gate(state: ALA_State) -> str:
+    """Mode "legal": berhenti setelah Legal Foundation — APH yang hanya
+    butuh pasal tidak perlu menunggu crawler + code generator."""
+    if state.get("mode") == "legal":
+        return END
+    return "internet_crawler"
+
+
 @lru_cache(maxsize=1)
 def build_graph():
     """Bangun state machine LangGraph (lazy singleton)."""
@@ -56,11 +64,14 @@ def build_graph():
 
     graph.set_entry_point("alcd")
     graph.add_conditional_edges("alcd", _knowledge_gate)
-    graph.add_edge("legal_foundation", "internet_crawler")
+    graph.add_conditional_edges("legal_foundation", _mode_gate)
     graph.add_edge("internet_crawler", "synthesis_developer")
     graph.add_edge("synthesis_developer", END)
 
     return graph.compile()
+
+
+_REDUCED_KEYS = ("audit_trail", "errors")  # reducer operator.add → append
 
 
 def run_pipeline(
@@ -68,6 +79,8 @@ def run_pipeline(
     institution_id: str = "",
     tier_level: str = "free",
     context_token_budget: int = 2048,
+    on_node=None,
+    mode: str = "full",
 ) -> ALA_State:
     """Jalankan pipeline 4-agen untuk satu query.
 
@@ -76,6 +89,9 @@ def run_pipeline(
         institution_id: tenant (untuk data operasional, BUKAN hukum).
         tier_level: tier SaaS pengguna.
         context_token_budget: num_ctx efektif dari middleware.
+        on_node: callback opsional `on_node(node_name)` — dipanggil tiap
+            kali satu node selesai (untuk progres real-time).
+        mode: "full" = 4 agen; "legal" = hanya sampai pasal (cepat).
 
     Returns:
         ALA_State final dengan semua output agen.
@@ -86,9 +102,28 @@ def run_pipeline(
         "institution_id": institution_id,
         "tier_level": tier_level,
         "context_token_budget": context_token_budget,
+        "mode": mode,
         "audit_trail": [],
         "errors": [],
     }
     logger.info("Pipeline mulai — institusi=%s tier=%s budget=%d",
                 institution_id, tier_level, context_token_budget)
-    return app.invoke(initial)
+
+    # stream(mode="updates") mengembalikan {node: state_delta} per langkah —
+    # merge manual (reducer keys di-append, sisanya ditimpa) sekaligus
+    # memicu callback progres. Hasil akhir setara app.invoke(initial).
+    state: dict = dict(initial)
+    for event in app.stream(initial, stream_mode="updates"):
+        for node, delta in event.items():
+            for key, value in (delta or {}).items():
+                if key in _REDUCED_KEYS and isinstance(value, list):
+                    state.setdefault(key, [])
+                    state[key] = state[key] + value
+                else:
+                    state[key] = value
+            if on_node:
+                try:
+                    on_node(node)
+                except Exception:
+                    logger.exception("on_node callback gagal (%s)", node)
+    return state

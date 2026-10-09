@@ -34,12 +34,20 @@ ALA menerapkan pendekatan **Defense in Depth** dengan beberapa lapisan keamanan:
 
 ## 2. Authentication & Authorization
 
-### 2.1 Autentikasi
+### 2.1 Autentikasi (IMPLEMENTASI — Okt 2026)
 
-- **Metode:** JWT (JSON Web Token) Bearer Token
-- **Algoritma:** HS256
-- **Expiry:** 24 jam (configurable)
-- **Refresh Token:** 7 hari
+- **Metode:** JWT HS256 lokal (`app/auth.py`) — `python-jose` + `bcrypt` langsung; zero-cost, tanpa provider eksternal (passlib dibypass: tidak kompatibel bcrypt ≥4.x)
+- **Penerbitan:** `POST /api/v1/auth/login` — verifikasi `password_hash` bcrypt di tabel `users`; respons generik saat gagal (tidak bocorkan akun terdaftar); rate-limit 10/menit/IP
+- **Klaim:** `sub` (user_id), `inst` (institution_id), `role`, `tier`, `iat`, `exp`
+- **Expiry:** `JWT_EXPIRY_HOURS` (default 24 jam)
+- **Bootstrap:** `scripts/seed_admin.py` membuat super_admin pertama bila tabel `users` kosong (password dari `ALA_ADMIN_PASSWORD` atau acak dicetak sekali); pengguna berikutnya via `POST /api/v1/admin/users` (super_admin)
+- **Refresh Token:** belum ada — login ulang setelah `exp`
+- **Fallback dev:** header `X-User-Role`/`X-Institution-ID` hanya dihormati bila `AUTH_DEV_HEADERS=true` — **wajib `false` di deployment nyata**
+
+### 2.1a Rate Limiting & Audit Integrity
+
+- `app/middleware/ratelimit.py`: sliding window per-IP pada `/auth/login` (10/mnt), `/analyze-trend` (10/mnt), `/approve-workflow` (20/mnt), `/alcd/trigger` (3/5mnt) — in-memory, zero-cost
+- `app/audit.py`: **hash-chain tamper-evident** — tiap baris `ai_audit_logs` membawa `prev_hash` + `entry_hash` (SHA-256); manipulasi/penghapusan baris memutus rantai, terdeteksi via `GET /api/v1/audit-logs/verify` (super_admin). Dikombinasikan dengan `REVOKE UPDATE/DELETE` DB-level → append-only + terdeteksi
 
 ### 2.2 Role-Based Access Control (RBAC)
 
@@ -162,6 +170,35 @@ WHITELISTED_IMPORTS = [
     │
     └──▶ ✅ PASS → Kode aman untuk review manusia
 ```
+
+### 3.3 Knowledge Provenance & Grounding (Korpus & Jawaban)
+
+Setiap potongan pengetahuan membawa label provenance di
+`knowledge_registry.source_url` dan metadata chunk Chroma. Tingkat
+kepercayaan berbeda per saluran — jawaban tidak boleh menyamakan
+riset kurasi dengan teks primer:
+
+| Provenance | Sumber | Tingkat |
+|-----------|--------|---------|
+| `https://` domain resmi (BPK/JDIH/MA) | Crawl terverifikasi identitas+subjek+status | **Primer terverifikasi** |
+| `spkt://`, `lexisai://`, `hf://laws` | Korpus yang sudah dikurasi proyek/dataset terpercaya | **Primer terkurasi** |
+| `hf://putusan/*` | Putusan MA terstruktur | Yurisprudensi terkurasi |
+| `aph://` | Riset domain APH (markdown kurasi manusia) | **Pengetahuan aplikatif — BUKAN pasal primer**; tidak boleh disitasi sebagai UU |
+| `doktrin` category | Gloss konsep hasil LLM | Konseptual, `verified=false`; membantu pemahaman, bukan dasar hukum |
+
+**Grounding ditegakkan di kode, bukan prompt** (pola regulated-rag):
+
+1. **Sitasi → set retrieval** — setiap `Pasal N` dalam jawaban harus
+   ada di artikel yang benar-benar di-retrieve; sitasi di luar set →
+   peringatan, dan bila *semua* sitasi ungrounded → jawaban ditolak
+2. **Fidelity klaim** — kalimat berisi sitasi harus berbagi kata-isi
+   dengan bunyi pasalnya (coverage ≥34%)
+3. **Temporal** — UU yang berlaku setelah tahun peristiwa ditandai
+   anakronisme (evaluasi versi hukum saat kejadian)
+4. **Abstention** — `⌀ ABSTAIN` bila bukti lemah daripada memaksakan
+   jawaban; `audit_trail[].abstained` mencatat alasan
+5. **Feedback agregat** — `retrieval_feedback` hanya menyimpan
+   (law, pasal, cited) — teks query tidak disimpan
 
 ---
 
@@ -342,7 +379,7 @@ GOOGLE_CSE_API_KEY=<key>
 │     │                               │
 │     ├── PostgreSQL (5432) - internal │
 │     ├── Neo4j (7687) - internal     │
-│     ├── ChromaDB (8000) - internal  │
+│     ├── ChromaDB (8001) - internal  │
 │     └── Sandbox (no network)        │
 │                                     │
 │  Firewall: Only port 443 exposed    │

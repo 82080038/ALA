@@ -75,6 +75,30 @@
 └──────────────────────────────────────────┘
 ```
 
+### 2.3 Native systemd (deployment aktual saat ini)
+
+Lingkungan dev/produksi saat ini berjalan sebagai **systemd user units**
+(native, tanpa container untuk service data):
+
+| Unit | Port | Data |
+|------|------|------|
+| `ala-postgres.service` | `5432` | `.pgdata/` |
+| `ala-chroma.service` | `8001` | `.chroma/` |
+| `ala-neo4j.service` | `7687` | `.neo4j/` |
+| `ala-api.service` | `8080` | FastAPI (`main:app`) |
+| `ala-frontend.service` | `3000` | Next.js dev server |
+
+```bash
+# Unit ada di ~/.config/systemd/user/ — ordering sudah diatur
+systemctl --user status ala-api        # status + health
+journalctl --user -u ala-api -f        # log live
+systemctl --user restart ala-api       # restart
+```
+
+Env runtime tidak dibaca dari `.env` — konfigurasi nyata ada di
+`backend/.env.runtime` (dimuat oleh unit/script via `set -a; .
+.env.runtime`). `Settings` tetap kompatibel `.env` untuk Docker.
+
 ---
 
 ## 3. Deployment Steps
@@ -143,6 +167,12 @@ GOOGLE_CSE_API_KEY=<your-key>
 # === Security ===
 JWT_SECRET=<GENERATE_STRONG_SECRET>
 JWT_EXPIRY_HOURS=24
+# Fallback header auth (X-User-Role dsb.) untuk dev standalone —
+# WAJIB false di deployment nyata, atau siapa pun bisa mengaku super_admin
+AUTH_DEV_HEADERS=false
+# Password super_admin pertama (dipakai scripts/seed_admin.py; bila kosong
+# password acak dicetak sekali ke stdout)
+ALA_ADMIN_PASSWORD=<password-admin-pertama>
 
 # === Application ===
 APP_HOST=0.0.0.0
@@ -158,6 +188,30 @@ ALCD_SCHEDULE_INTERVAL=168h
 ALCD_MAX_CONCURRENT_CRAWLS=3
 ALCD_TRUSTED_DOMAINS=jdih.kemenkumham.go.id,peraturan.bpk.go.id,putusan3.mahkamahagung.go.id
 ALCD_CRAWL_RATE_LIMIT=1
+
+# === Embedding retrieval (opsional — default multilingual-e5-small) ===
+# Jalur upgrade: LazarusNLP/all-indo-e5-small-v4 (384-dim, khusus
+# Bahasa Indonesia — drop-in) lalu BGE-M3-ind. GANTI MODEL WAJIB
+# kosongkan koleksi `indonesian_laws` dan re-embed ulang seluruh
+# korpus (bootstrap ALCD) — mencampur vektor beda model merusak
+# retrieval diam-diam.
+EMBEDDING_MODEL=intfloat/multilingual-e5-small
+
+# === Korpus HuggingFace (opsional) ===
+# Cache parquet + batas impor bertahap.
+HF_CORPUS_DIR=backend/data/hf
+HF_IMPORT_MAX_LAWS=0        # 0 = semua 1.924 UU JDIH BPK
+HF_PUTUSAN_MAX=2000         # ≤0 = nonaktifkan impor putusan MA
+
+# === Reranker & indeks leksikal (lokal, zero-cost) ===
+# Cross-encoder CPU-viable (~118MB, diunduh sekali dari HF). Upgrade ke
+# BAAI/bge-reranker-v2-m3 bila torch CUDA tersedia. Skor hanya mengatur
+# urutan kandidat — relevance_score tetap cosine dense.
+RERANKER_ENABLED=true
+RERANKER_MODEL=cross-encoder/mmarco-mMiniLMv2-L12-H384-v1
+RERANKER_TOP=48
+# Snapshot BM25 — cold-start memuat disk, bukan rebuild korpus penuh.
+BM25_INDEX_PATH=/home/<user>/.chroma/bm25_index.pkl
 ```
 
 ### 3.4 Dual-GPU Ollama (Host)
@@ -217,6 +271,10 @@ docker compose logs -f
 # Memakai DATABASE_ADMIN_URL (ala_user) untuk DDL + membuat role
 # aplikasi `ala_app` (non-superuser) beserta GRANT + RLS + REVOKE.
 docker compose exec api python scripts/init_db.py
+
+# Akun super_admin pertama (bila tabel users kosong). Password dari
+# ALA_ADMIN_PASSWORD, atau acak dicetak sekali ke stdout.
+docker compose exec api python scripts/seed_admin.py
 ```
 
 > **PENTING — RLS & append-only audit:** aplikasi runtime terhubung via
@@ -248,6 +306,7 @@ docker compose build
 docker build -t ala-sandbox:latest ./sandbox
 docker compose up -d
 docker compose exec api python scripts/init_db.py
+docker compose exec api python scripts/seed_admin.py
 ```
 
 Determinisme versi: `frontend/package-lock.json` (`npm ci`) +

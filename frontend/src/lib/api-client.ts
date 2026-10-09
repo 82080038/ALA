@@ -22,10 +22,15 @@ async function apiFetch<T>(
   identity: Identity,
   init: RequestInit = {}
 ): Promise<T> {
+  // JWT Bearer diutamakan bila pengguna sudah login (ala_token);
+  // header identitas tetap dikirim sebagai fallback dev.
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("ala_token") : null;
   const res = await fetch(`${API_BASE_URL}/api/v1${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...tenantHeaders(identity),
       ...(init.headers || {}),
     },
@@ -101,6 +106,7 @@ export interface GeneratedOutput {
   description?: string;
   code?: string;
   flowchart?: string;
+  syntax_valid?: boolean;
 }
 
 export interface AnalysisResult {
@@ -116,6 +122,22 @@ export interface AnalysisResult {
   generated_output: GeneratedOutput;
   errors: string[];
   requires_approval: boolean;
+}
+
+export interface AnalysisJob {
+  request_id: string;
+  kind: string;
+  mode: string;
+  query: string;
+  status: "queued" | "running" | "done" | "failed";
+  stage: string | null;
+  stages_completed: string[];
+  pipeline_stages: string[];
+  stage_labels: Record<string, string>;
+  started_at: number;
+  finished_at: number | null;
+  error: string | null;
+  result?: AnalysisResult;
 }
 
 export interface ExecutionResult {
@@ -181,6 +203,11 @@ export interface Feature {
 
 export const fetchSystemStatus = (id: Identity) =>
   get<SystemStatus>("/status", id);
+export const fetchInstitutionOptions = (id: Identity) =>
+  get<{ institutions: { id: string; name: string; type: string }[] }>(
+    "/institutions",
+    id
+  );
 export const fetchAlcdStatus = (id: Identity) =>
   get<AlcdStatus>("/alcd/status", id);
 export const fetchOntology = (id: Identity) =>
@@ -188,10 +215,23 @@ export const fetchOntology = (id: Identity) =>
 export const fetchGaps = (id: Identity) =>
   get<{ gaps: KnowledgeGap[] }>("/alcd/gaps", id);
 export const triggerAlcd = (id: Identity) =>
-  post<Record<string, unknown>>("/alcd/trigger", id);
+  post<{ request_id: string; status: string }>("/alcd/trigger", id);
 
-export const analyzeTrend = (id: Identity, query: string, caseId?: string) =>
-  post<AnalysisResult>("/analyze-trend", id, { query, case_id: caseId || null });
+export const startAnalysis = (
+  id: Identity,
+  query: string,
+  mode: "full" | "legal" = "full",
+  caseId?: string
+) =>
+  post<{ request_id: string; status: string }>("/analyze-trend", id, {
+    query,
+    mode,
+    case_id: caseId || null,
+  });
+export const fetchAnalysis = (id: Identity, requestId: string) =>
+  get<AnalysisJob>(`/analyze-trend/${requestId}`, id);
+export const fetchActivity = (id: Identity) =>
+  get<{ jobs: AnalysisJob[] }>("/activity", id);
 
 export const approveWorkflow = (
   id: Identity,
@@ -224,3 +264,34 @@ export const overrideFeatureTier = (id: Identity, featureId: string, tier: strin
   post(`/admin/features/${featureId}/override-tier`, id, { tier_level: tier });
 export const toggleFeature = (id: Identity, featureId: string) =>
   post(`/admin/features/${featureId}/toggle`, id);
+
+// --- Auth (JWT lokal — POST /auth/login) -----------------------------------------
+
+export interface LoginResult {
+  token: string;
+  token_type: string;
+  expires_in_hours: number;
+  user: {
+    id: string; name: string; role: string; tier: string;
+    institution_id: string;
+  };
+}
+
+export async function loginApi(email: string, password: string): Promise<LoginResult> {
+  const res = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(res.status, body.detail || "Login gagal");
+  }
+  const data = (await res.json()) as LoginResult;
+  localStorage.setItem("ala_token", data.token);
+  return data;
+}
+
+export const logoutApi = () => localStorage.removeItem("ala_token");
+export const isLoggedIn = () =>
+  typeof window !== "undefined" && !!localStorage.getItem("ala_token");

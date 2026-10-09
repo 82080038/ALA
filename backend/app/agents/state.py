@@ -50,6 +50,7 @@ class ALA_State(TypedDict, total=False):
     institution_id: str          # tenant pemilik request (data operasional)
     tier_level: str              # free | premium_l1 | premium_l2
     context_token_budget: int    # num_ctx efektif: min(tier_cap, hw_ceiling)
+    mode: str                    # "full" (4 agen) | "legal" (hanya pasal)
 
     # ── Agent 0: ALCD (bootstrap pengetahuan — GLOBAL) ─────
     knowledge_ready: bool

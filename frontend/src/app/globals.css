@@ -57,3 +57,89 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ---------------------------------------------------------------
+   Otak ALA — efek terminal/CRT (audit desain: neo-terminal,
+   phosphor, NERV ops console)
+   --------------------------------------------------------------- */
+
+/* Font terminal */
+.font-term {
+  font-family: "JetBrains Mono", "Share Tech Mono", "Cascadia Code",
+    ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* Scanline CRT halus — overlay non-interaktif */
+.scanlines::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.16) 0px,
+    rgba(0, 0, 0, 0.16) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+/* Vignette — tepi layar menggelap seperti tabung CRT */
+.crt-vignette::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 55%,
+    rgba(0, 0, 0, 0.55) 100%
+  );
+}
+
+/* Cahaya fosfor pada teks */
+.text-glow {
+  text-shadow: 0 0 7px rgba(74, 255, 158, 0.55),
+    0 0 22px rgba(74, 255, 158, 0.22);
+}
+.text-glow-dim {
+  text-shadow: 0 0 5px rgba(74, 255, 158, 0.3);
+}
+
+/* Tick sudut panel (┌ ┐ └ ┘) ala konsol operasi */
+.corner-ticks > .ct {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-color: rgba(74, 255, 158, 0.4);
+  border-style: solid;
+  pointer-events: none;
+}
+.corner-ticks > .ct-tl { top: 0; left: 0; border-width: 1px 0 0 1px; }
+.corner-ticks > .ct-tr { top: 0; right: 0; border-width: 1px 1px 0 0; }
+.corner-ticks > .ct-bl { bottom: 0; left: 0; border-width: 0 0 1px 1px; }
+.corner-ticks > .ct-br { bottom: 0; right: 0; border-width: 0 1px 1px 0; }
+
+/* Kedip kursor blok */
+@keyframes caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.caret-blink {
+  animation: caret-blink 1.1s steps(1) infinite;
+}
+
+/* Grid titik latar — tekstur samar di belakang otak */
+.dot-grid {
+  background-image: radial-gradient(
+    rgba(74, 255, 158, 0.05) 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+
+/* Aksesibilitas: pengguna yang meminta gerakan minimal */
+@media (prefers-reduced-motion: reduce) {
+  .caret-blink,
+  .animate-pulse {
+    animation: none !important;
+  }
+}

@@ -115,37 +115,42 @@ ALA menggunakan **tiga jenis database** yang masing-masing dioptimalkan untuk us
 
 | Aspek | Detail |
 |-------|--------|
-| **Mode** | Local client atau containerized service |
+| **Mode** | Service `ala-chroma` (server HTTP di `:8001`, persist di `.chroma/`) |
 | **Scope** | **GLOBAL** — `indonesian_laws` dibagikan ke semua institusi (no `institution_id` pada metadata) |
-| **Embedding Model** | `sentence-transformers/all-MiniLM-L6-v2` |
-| **Chunking Strategy** | 500 karakter per chunk, 50 karakter overlap |
+| **Embedding Model** | `intfloat/multilingual-e5-small` (384-dim, prefix `query:`/`passage:` wajib) — dikonfigurasi via `EMBEDDING_MODEL`; jalur upgrade terdokumentasi ke `LazarusNLP/all-indo-e5-small-v4` / BGE-M3-ind (**ganti model = wajib re-embed seluruh koleksi**) |
+| **Chunking Strategy** | 500 karakter per chunk, 50 karakter overlap; setiap chunk pasal diawali anchor hierarki (`[BAB II · Bagian Kesatu]`) |
 | **Metadata Fields** | `law_name`, `article_number`, `topic`, `law_category`, `source_url`, `discovery_date`, `verified` |
 | **Koleksi** | `indonesian_laws` (GLOBAL); `tenant_<institution_id>_*` hanya untuk data operasional tenant jika dibutuhkan kelak |
 | **Initial State** | **EMPTY** — populated autonomously by the ALCD module |
 
 > **Anti-duplikasi:** Hukum positif Indonesia identik untuk semua institusi. Menduplikasikan `indonesian_laws` per tenant membuang storage/VRAM dan membuka risiko inkonsistensi — oleh karena itu koleksi hukum bersifat GLOBAL dan query RAG tidak difilter tenant.
 
-**Proses Ingestion (Autonomous via ALCD):**
+**Proses Ingestion (Autonomous via ALCD — multi-channel):**
 1. ALCD module generates legal ontology and identifies required knowledge
-2. ALCD discovers authoritative sources via web search (JDIH, BPK, MA)
-3. ALCD downloads and parses full-text legal documents (HTML/PDF)
-4. Teks dipotong menjadi chunks 500 karakter dengan overlap 50 karakter
-5. Setiap chunk dikonversi menjadi embedding vector 384 dimensi
-6. Disimpan di ChromaDB beserta metadata (nama UU, nomor pasal, topik, kategori hukum, source URL, discovery date, verification status)
-7. ALCD self-evaluates knowledge quality and fills gaps autonomously
+2. **Fondasi doktrin dulu** — 21 konsep berjenjang (pengantar ilmu hukum → perundangan → materiil → acara → delik khusus) ditulis LLM sebagai gloss, kategori `doktrin`, `verified=False`
+3. **Korpus terverifikasi** (`external_corpus.py`): SPKT `spkt://` (UU+rujukan+putusan MK), LexisAI `lexisai://` (re-embed), riset APH `aph://` (30 dok kurasi), HuggingFace `hf://laws` (1.924 UU/105K pasal JDIH BPK), `hf://putusan` (putusan MA terstruktur)
+4. **Crawl otonom** hanya untuk celah yang tersisa: Google Search → unduh (HTML/PDF, OCR fallback ocrmypdf+tesseract `ind`) → parse (Bab/Bagian/Paragraf/Pasal + klausa TENTANG) → verifikasi identitas↔isi & status≠dicabut
+5. Chunk → embedding E5 → ChromaDB + graph rujukan → Neo4j + registry → evaluasi deterministik (`_EXPECTED_LAW_IDS` + registry — LLM-judge hanya ke `self_eval_logs`)
 
-> **NOTE:** There are NO pre-loaded documents. The `data/` directory does not exist. All legal data is acquired from the internet by the ALCD module.
+> **NOTE:** There are NO pre-loaded documents. The `data/` directory only holds caches (HF parquet di `backend/data/hf/`). All legal data is acquired autonomously — via verified corpora first, crawl only for residual gaps.
 
 **Kategori Hukum (`law_category`):**
 - `materiil` — Hukum pidana materiil (KUHP, UU ITE, UU Tipikor, UU Narkotika, UU TPPU)
-- `formil` — Hukum acara pidana (KUHAP)
-- `regulasi` — Peraturan teknis (Perkap, Perja)
-- `yurisprudensi` — Putusan Mahkamah Agung
+- `formil` — Hukum acara pidana (KUHAP 8/1981 & 20/2025)
+- `regulasi` — Peraturan teknis (Perkap, Perja, UU non-pidana)
+- `yurisprudensi` — Putusan MA/MK
+- `doktrin` — Ilmu hukum dasar & riset domain terkurasi (APH) — **bukan teks primer**, tidak disitasi sebagai UU
 
-**Proses Query (RAG):**
-1. Query pengguna dikonversi menjadi embedding vector
-2. Cosine similarity search mengambil top-k chunks relevan
-3. Chunks dikirim sebagai konteks ke LLM untuk generate jawaban
+**Proses Query (RAG hybrid):**
+1. Query → embedding E5 (`query:` prefix) → dense cosine candidates
+2. BM25 leksikal (indeks lokal, stopword Indonesia; snapshot disk di
+   `BM25_INDEX_PATH` agar cold-start tak rebuild) → kandidat literal
+3. RRF fusion + boost `retrieval_feedback` historis + boost deterministik
+   `_mention_boosts` (UU/Pasal yang disebut eksplisit di query)
+4. Reranker cross-encoder lokal (`RERANKER_MODEL`, default mMARCO-MiniLM)
+   mengurutkan top-48 — urutan saja; relevance_score tetap cosine dense
+5. Kandidat digabung, dedupe per (UU, pasal) → konteks LLM
+6. Jawaban → audit sitasi 3 sumbu → abstain jika bukti lemah/ungrounded
 
 ### 2.3 Graph Database — Neo4j 5+ (dengan APOC Plugin)
 
@@ -218,20 +223,30 @@ ALA adalah platform B2B SaaS multi-institusi, tetapi **basis pengetahuan hukum b
         → LLM reasons about APH domain
         → Generates structured knowledge tree
         → Stores in ontology_nodes table
-    → Phase 2: Autonomous Acquisition
+    → Phase 2: Doctrine Foundation (belajar ilmu hukum dulu)
+        → 21 konsep berjenjang ditulis LLM sebagai gloss
+        → Kategori doktrin — konteks konseptual, bukan sitasi primer
+    → Phase 3: Verified Corpus Import (external_corpus.py)
+        → spkt:// (~49 UU + rujukan resolved + putusan MK)
+        → lexisai:// (amandemen ITE/Tipikor/KPK, KUHAP 8/1981)
+        → aph:// (riset domain terkurasi — alur SPP per lembaga)
+        → hf://laws (1.924 UU / 105K pasal JDIH BPK)
+        → hf://putusan (putusan MA pidana; HF_PUTUSAN_MAX)
+        → Idempotent: dedupe (nomor,tahun) / source_url
+    → Phase 4: Autonomous Acquisition (celah yang tersisa saja)
         → For each ontology node:
-            → Google Search for authoritative sources
-            → Download & parse legal documents
-            → Verify against multiple sources
+            → Discover sources (Google Search / BPK / JDIH)
+            → Download & parse (OCR fallback untuk PDF scan)
+            → Verify identity↔subject↔status (dokumen usang ditolak)
             → Chunk, embed → ChromaDB
             → Build cross-references → Neo4j
             → Register in knowledge_registry
-    → Phase 3: Self-Evaluation
-        → Generate test questions per ontology node
-        → Query own RAG pipeline
-        → Score answers (LLM-as-judge)
+    → Phase 5: Self-Evaluation
+        → Deterministic scoring (registry ∩ _EXPECTED_LAW_IDS)
+        → LLM-as-judge hanya ke self_eval_logs (tidak menggerakkan
+          readiness — pernah rubber-stamp 0.977 pada korpus salah)
+        → Gold benchmark tersedia: scripts/eval_gold.py (P@k/MRR)
         → If score < threshold → re-research gaps
-        → Repeat until readiness score ≥ 0.8
     → System ready to accept user queries
 ```
 
@@ -245,10 +260,13 @@ ALA adalah platform B2B SaaS multi-institusi, tetapi **basis pengetahuan hukum b
         → If YES → proceed
     → LangGraph Orchestrator
     → Legal Foundation Agent (FIRST)
-        → ChromaDB semantic search (RAG) across ALL autonomously acquired laws
+        → Hybrid retrieval: dense E5 ∪ BM25 (snapshot disk) → RRF
+          + feedback boost + mention boost → cross-encoder rerank
         → Neo4j cross-reference lookup
         → Build comprehensive legal knowledge base
+        → ABSTAIN bila bukti lemah / sitasi ungrounded
         → Validate against KUHAP procedural requirements
+        → Citation audit 3-axis: eksistensi + fidelity + temporal
     → Internet Crawler Agent (SECOND)
         → Google Search API / BeautifulSoup
         → Discover ALL types of crime trends (universal)

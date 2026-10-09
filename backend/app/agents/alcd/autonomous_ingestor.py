@@ -16,7 +16,31 @@ logger = logging.getLogger("ala.alcd.ingestor")
 
 _CHUNK_SIZE = 500
 _CHUNK_OVERLAP = 50
-_EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Multilingual-E5 — retrieval terbaik untuk bahasa Indonesia dari model
+# yang muat di hardware (384-dim, 118M param). Wajib prefix asimetris:
+# "query: " untuk pencarian, "passage: " untuk dokumen (spec E5).
+# CATATAN: menyimpang dari DEVIN_PROMPT yang mengunci all-MiniLM-L6-v2 —
+# L6 English-centric terbukti menghasilkan skor relevansi ~0 untuk
+# teks hukum Indonesia; kualitas retrieval menang atas kaku spesifikasi.
+# Model dikonfigurasi via settings.embedding_model — ganti model =
+# ruang vektor berubah → WAJIB re-embed seluruh koleksi.
+_EMBED_MODEL = None
+
+
+def _embed_model_name() -> str:
+    return _EMBED_MODEL or settings.embedding_model
+
+
+def embed_documents(texts: list[str]) -> list[list[float]]:
+    """Embed dokumen/passage dengan prefix E5 wajib."""
+    return _get_embedder().encode(
+        ["passage: " + t for t in texts], show_progress_bar=False
+    ).tolist()
+
+
+def embed_query(query: str) -> list[float]:
+    """Embed satu query pencarian dengan prefix E5 wajib."""
+    return _get_embedder().encode("query: " + query).tolist()
 
 _embedder = None
 
@@ -28,7 +52,7 @@ def _get_embedder():
         from sentence_transformers import SentenceTransformer
 
         _embedder = SentenceTransformer(
-            _EMBED_MODEL.split("/")[-1], device=get_embedding_device()
+            _embed_model_name(), device=get_embedding_device()
         )
     return _embedder
 
@@ -71,7 +95,6 @@ def ingest_parsed_document(
     from app.database.chroma import get_chroma_client, get_laws_collection
 
     collection = get_laws_collection(get_chroma_client())
-    embedder = _get_embedder()
 
     ids, docs, metas = [], [], []
     for article in parsed["articles"]:
@@ -96,10 +119,18 @@ def ingest_parsed_document(
         return {"law_name": law_name, "chunks": 0, "articles": 0,
                 "status": "failed"}
 
-    embeddings = embedder.encode(docs, show_progress_bar=False).tolist()
+    embeddings = embed_documents(docs)
     # ChromaDB upsert — idempotent untuk re-ingestion
     collection.upsert(ids=ids, documents=docs, metadatas=metas,
                       embeddings=embeddings)
+    # Indeks BM25 kini basi — invalidate (cache + snapshot disk) agar
+    # rebuild pada query berikutnya, bukan membaca data usang.
+    try:
+        from app.agents.legal_foundation import invalidate_lexical_index
+
+        invalidate_lexical_index()
+    except Exception:
+        pass
     logger.info("Ingest %s: %d artikel, %d chunks", law_name,
                 len(parsed["articles"]), len(ids))
     return {
@@ -116,7 +147,8 @@ def register_knowledge(db, parsed: dict, result: dict, law_category: str,
     from app.models.operational import KnowledgeRegistry
 
     entry = KnowledgeRegistry(
-        law_name=result["law_name"],
+        law_name=result["law_name"][:255],
+        law_number=parsed.get("law_number"),
         law_category=law_category,
         source_url=parsed["source_url"],
         source_domain=parsed["source_url"].split("/")[2]
@@ -125,7 +157,15 @@ def register_knowledge(db, parsed: dict, result: dict, law_category: str,
         chunk_count=result["chunks"],
         article_count=result["articles"],
         verification_score=1.0 if verified else 0.5,
-        metadata_={"chapter_count": parsed.get("chapter_count", 0)},
+        metadata_={
+            "chapter_count": parsed.get("chapter_count", 0),
+            "law_year": parsed.get("law_year"),
+            "law_subject": parsed.get("law_subject"),
+            "source_status": parsed.get("source_status"),
+            "amends": parsed.get("amends") or [],
+            "revokes": parsed.get("revokes") or [],
+            "amended_by": parsed.get("amended_by") or [],
+        },
     )
     db.add(entry)
     db.commit()
