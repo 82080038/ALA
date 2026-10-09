@@ -98,6 +98,21 @@ Aturan keras kode:
 - File bukti hanya dibaca ("rb") — TIDAK PERNAH ditulis
 {custody_block}"""
 
+_REPAIR_PROMPT = """Kode Python berikut gagal parsing:
+
+{code}
+
+Error: {error}
+
+Perbaiki kodenya agar valid. Balas HANYA JSON dengan format sama:
+{{
+  "filename": "nama_file.py",
+  "language": "python",
+  "description": "deskripsi singkat",
+  "code": "kode python lengkap dan valid",
+  "flowchart": "graph TD\\n    A[Mulai] --> B[...]"
+}}"""
+
 _EVIDENCE_KEYWORDS = re.compile(
     r"(bukti|evidence|parse|ekstrak|extract|analisis|analyze|log|"
     r"dump|file|dokumen|scan|baca)", re.IGNORECASE)
@@ -219,21 +234,41 @@ def synthesis_developer_agent(state) -> dict:
         code = _inject_custody(code)
 
     # Validasi sintaks SEKARANG — kode terpotong (num_predict habis) atau
-    # malformed tidak layak diajukan ke persetujuan manusia.
-    syntax_valid = True
+    # malformed tidak layak diajukan ke persetujuan manusia. Model 3B
+    # lokal kadang mengembalikan kode cacat; beri SATU kesempatan
+    # perbaikan (error + kode gagal dikirim balik) sebelum menyerah.
+    import ast
+    syntax_valid, repaired = True, False
     if code:
-        import ast
         try:
             ast.parse(code)
         except SyntaxError as exc:
             syntax_valid = False
-            updates.setdefault("errors", [])
-            updates["errors"] = updates["errors"] + [
-                f"Kode hasil AI tidak valid (SyntaxError baris "
-                f"{exc.lineno}: {exc.msg}) — kemungkinan terpotong limit "
-                f"token tier. Coba query ulang atau naikkan tier."
-            ]
-            logger.warning("Kode hasil AI gagal ast.parse: %s", exc)
+            try:
+                fix = llm_coder.invoke(_REPAIR_PROMPT.format(
+                    code=code[:4000], error=str(exc)))
+                fixed = _extract_json(
+                    fix.content if hasattr(fix, "content") else str(fix)
+                ) or {}
+                new_code = fixed.get("code", "")
+                if new_code and _needs_custody(
+                        new_code, fixed.get("description", "")):
+                    new_code = _inject_custody(new_code)
+                if new_code:
+                    ast.parse(new_code)
+                    code, out, syntax_valid, repaired = (
+                        new_code, fixed, True, True)
+            except (SyntaxError, Exception) as rex:  # noqa: BLE001
+                logger.warning("Repair codegen gagal: %s", rex)
+            if not syntax_valid:
+                updates.setdefault("errors", [])
+                updates["errors"] = updates["errors"] + [
+                    f"Kode hasil AI tidak valid (SyntaxError baris "
+                    f"{exc.lineno}: {exc.msg}) — kemungkinan terpotong "
+                    f"limit token tier. Coba query ulang atau naikkan "
+                    f"tier."
+                ]
+                logger.warning("Kode hasil AI gagal ast.parse: %s", exc)
 
     updates["generated_output"] = {
         "filename": out.get("filename", "utility.py"),
@@ -248,5 +283,6 @@ def synthesis_developer_agent(state) -> dict:
         filename=out.get("filename"),
         code_lines=code.count("\n") + 1 if code else 0,
         custody_enforced=bool(code and "_sha256(" in code),
+        repaired=repaired,
     )
     return updates

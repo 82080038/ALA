@@ -520,6 +520,25 @@ _FIDELITY_STOPS = frozenset(
 
 _LAW_YEAR_RE = re.compile(r"Tahun\s+(\d{4})", re.IGNORECASE)
 _EVENT_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+# Identitas peraturan ("UU No 8 Tahun 1981", "UU 19/2016",
+# "Peraturan Pemerintah No 71 Tahun 2019") — tahun di sini adalah
+# tahun TERBIT aturan, BUKAN tahun peristiwa. Harus dilucuti dari
+# query sebelum menambang tahun peristiwa, atau UU yang disebut
+# menghasilkan false-positive anakronisme untuk dirinya sendiri.
+_LAW_CITE_RE = re.compile(
+    r"(?:undang[-\s]undang|uu|peraturan\s+\w+|pp|perppu|perda|permen"
+    r"|perpres|perkap|perja|perpol)\s+"
+    r"(?:no(?:mor)?\.?\s*)?\d{1,3}\s*(?:tahun|/)\s*\d{4}",
+    re.IGNORECASE)
+
+
+def _event_years_of(query: str) -> list[int]:
+    """Tahun peristiwa dari query — setelah referensi peraturan
+    dilucuti. Multi-tahun → tahun paling awal (peristiwa pertama)."""
+    masked = _LAW_CITE_RE.sub(" ", query or "")
+    return sorted({
+        int(y) for y in _EVENT_YEAR_RE.findall(masked)
+        if 1945 <= int(y) <= 2100})
 
 
 def _audit_citations(summary: str, articles: list[dict],
@@ -564,11 +583,9 @@ def _audit_citations(summary: str, articles: list[dict],
                 weak.append(f"Pasal {n}")
 
     # Sumbu temporal — tahun peristiwa dari query vs tahun UU pasal
-    # yang tersitasi. Ambil tahun paling awal di query sebagai kandidat
-    # tahun peristiwa (tahun lain biasanya bagian nomor UU).
-    event_years = [
-        int(y) for y in _EVENT_YEAR_RE.findall(query or "")
-        if 1945 <= int(y) <= 2100]
+    # yang tersitasi. Tahun identitas peraturan sudah dilucuti agar
+    # menyebut "UU 1/2023" tidak dianggap tahun peristiwa.
+    event_years = _event_years_of(query)
     anachronisms: list[str] = []
     if event_years:
         event_year = min(event_years)

@@ -23,6 +23,8 @@
 - `external_corpus.py` — false positive relasi amandemen dari window karakter lintas-kalimat → pencocokan tingkat kalimat
 - `audit.py` — digest hash-chain dinormalisasi ke UTC: `timestamptz` dibaca ulang dengan offset sesi (+07:00) memutus rantai palsu
 - `legal_foundation._log_retrieval` — `CREATE TABLE` di runtime gagal diam-diam (role `ala_app` tanpa privilege CREATE) → `retrieval_feedback` selalu kosong; DDL kini hanya milik `init_db.py`
+- `legal_foundation._event_years_of` — tahun identitas peraturan (`UU No X Tahun Y`, `UU X/YYYY`, PP/Perpres/dsb.) dilucuti dari query sebelum menambang tahun peristiwa → menyebut "UU 19/2016" tidak lagi menghasilkan false-positive anakronisme terhadap pasal UU tersebut
+- `code_generator.py` — kode hasil model 3B lokal yang gagal `ast.parse` mendapat SATU repair-pass (error + kode dikirim balik ke coder; re-validasi + custody re-inject; `audit.repaired`) sebelum error graceful
 
 ### Added — Adopsi korpus & evaluasi eksternal (riset GitHub/HuggingFace, Okt 2026)
 - **Importer `hf://`** di `alcd/external_corpus.py` — dua dataset HuggingFace sebagai saluran akuisisi terverifikasi: `endomorphosis/ipfs_indonesia_laws` (1.924 UU / 105.645 pasal ter-split dari JDIH BPK, `law_status`→`source_status` untuk audit temporal; prioritas UU pidana/acara/APH) dan `Azzindani/ID_Supreme_Court_Parquet` (22.630 putusan MA pidana terstruktur: kepala/dakwaan/tuntutan/fakta/amar → kategori `yurisprudensi`; `HF_PUTUSAN_MAX`, ≤0 nonaktif). Cache parquet di `backend/data/hf/` (gitignored)

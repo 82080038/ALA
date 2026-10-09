@@ -101,6 +101,20 @@ def test_audit_digest_timezone_normalization():
     assert _entry_digest(row_a, "0" * 64) == _entry_digest(row_b, "0" * 64)
 
 
+def test_event_years_ignores_law_citations():
+    """Tahun identitas UU bukan tahun peristiwa — false-positive
+    anakronisme terhadap UU yang disebut harus hilang."""
+    from app.agents.legal_foundation import _event_years_of
+
+    assert _event_years_of("UU 19/2016 Pasal 27") == []
+    assert _event_years_of("UU Nomor 35 Tahun 2009 tentang Narkotika") == []
+    assert _event_years_of(
+        "peristiwa 2020 melanggar UU No 8 Tahun 2010") == [2020]
+    assert _event_years_of("tindak pidana tahun 2019 dan 2021") == [
+        2019, 2021]
+    assert _event_years_of("modus pencucian uang crypto") == []
+
+
 def test_extract_skips_self_reference():
     t = "Undang-undang ini mencabut Undang-Undang Nomor 1 Tahun 2024."
     rels = _extract_law_relations(t, "1", "2024")
