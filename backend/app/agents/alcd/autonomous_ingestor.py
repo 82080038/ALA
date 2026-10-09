@@ -16,6 +16,10 @@ logger = logging.getLogger("ala.alcd.ingestor")
 
 _CHUNK_SIZE = 500
 _CHUNK_OVERLAP = 50
+# Batas chunk per satu artikel/seksi — putusan MA dengan transkrip
+# fakta ratusan halaman (ratusan ribu chunk) menggantung embedding
+# CPU belasan menit per dokumen; 200 chunk ≈ 100KB teks.
+_MAX_CHUNKS_PER_ARTICLE = 200
 # Multilingual-E5 — retrieval terbaik untuk bahasa Indonesia dari model
 # yang muat di hardware (384-dim, 118M param). Wajib prefix asimetris:
 # "query: " untuk pencarian, "passage: " untuk dokumen (spec E5).
@@ -97,8 +101,15 @@ def ingest_parsed_document(
     collection = get_laws_collection(get_chroma_client())
 
     ids, docs, metas = [], [], []
+    truncated = 0
     for article in parsed["articles"]:
         chunks = chunk_text(article["content"])
+        # Batas per-artikel: seksi patologis (transkrip fakta putusan
+        # ratusan halaman) tetap masuk tetapi tidak menghabiskan
+        # belasan menit embedding CPU — kepalanya cukup untuk retrieval.
+        if len(chunks) > _MAX_CHUNKS_PER_ARTICLE:
+            truncated += len(chunks) - _MAX_CHUNKS_PER_ARTICLE
+            chunks = chunks[:_MAX_CHUNKS_PER_ARTICLE]
         for i, chunk in enumerate(chunks):
             ids.append(_doc_id(law_name, article["article_number"], i))
             docs.append(chunk)
@@ -131,6 +142,9 @@ def ingest_parsed_document(
         invalidate_lexical_index()
     except Exception:
         pass
+    if truncated:
+        logger.warning("Ingest %s: %d chunk dipangkas (batas %d/artikel)",
+                       law_name, truncated, _MAX_CHUNKS_PER_ARTICLE)
     logger.info("Ingest %s: %d artikel, %d chunks", law_name,
                 len(parsed["articles"]), len(ids))
     return {

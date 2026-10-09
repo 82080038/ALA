@@ -92,6 +92,10 @@ def _save_bm25_snapshot() -> None:
         logger.warning("Snapshot BM25 gagal disimpan: %s", exc)
 
 
+_BM25_ID_PAGE = 10_000
+_BM25_GET_BATCH = 4_000  # < batas variabel sqlite Chroma (~32K)
+
+
 def invalidate_lexical_index() -> None:
     """Dipanggil ingestor setelah upsert — chunk baru/terubah memaksa
     rebuild pada query berikutnya (snapshot lama dihapus)."""
@@ -122,8 +126,28 @@ def _lexical_index(collection):
             return _lex_cache
         from app.agents.bm25 import BM25Index
 
-        got = collection.get(include=["documents", "metadatas"])
-        ids, docs, metas = got["ids"], got["documents"], got["metadatas"]
+        # Fetch dua tahap: ids dulu (halaman demi halaman — get()
+        # tanpa argumen meledak "too many SQL variables" pada
+        # sqlite Chroma saat koleksi >~32K baris), lalu dokumen
+        # per-batch by id — offset pagination bisa geser saat
+        # ingest konkuren, daftar id snapshot tidak.
+        all_ids: list[str] = []
+        offset = 0
+        while True:
+            page = collection.get(include=[], limit=_BM25_ID_PAGE,
+                                  offset=offset)
+            if not page["ids"]:
+                break
+            all_ids.extend(page["ids"])
+            offset += len(page["ids"])
+        ids, docs, metas = [], [], []
+        for i in range(0, len(all_ids), _BM25_GET_BATCH):
+            got = collection.get(
+                ids=all_ids[i:i + _BM25_GET_BATCH],
+                include=["documents", "metadatas"])
+            ids.extend(got["ids"])
+            docs.extend(got["documents"])
+            metas.extend(got["metadatas"])
         logger.info("Bangun indeks BM25 atas %d chunk", len(docs))
         _lex_cache.update(count=n, index=BM25Index(docs),
                           ids=ids, metas=metas, docs=docs)
@@ -368,6 +392,18 @@ def _rag_retrieve(query: str, n_results: int = 12) -> list[dict]:
     # Cross-encoder rerank atas kandidat teratas — presisi kontekstual
     # pasangan (query, pasal) yang tak tertangkap bi-encoder E5.
     ordered = _rerank(query, fused, dense_meta, id2doc)
+    # Pin deterministik pasca-rerank: bila query menyebut UU+Pasal
+    # secara eksplisit, dokumen yang identitasnya cocok PERSIS harus
+    # mendahului — reranker semantik tidak boleh menenggelamkan
+    # sitasi yang diminta user (mis. putusan lain di atas pasal UU).
+    # BM25 hanya mengindeks isi chunk, bukan metadata — pasal yang
+    # disebut bisa absen dari KEDUA kandidat; suntikkan langsung.
+    mention = _mention_boosts(query, cache["ids"], cache["metas"])
+    pinned = {did for did, b in mention.items() if b >= 0.08}
+    if pinned:
+        have = {did for did, _ in ordered}
+        ordered += [(did, 0.0) for did in pinned if did not in have]
+        ordered.sort(key=lambda kv: kv[0] not in pinned)
     articles, seen_art = [], set()
     for did, _fs in ordered:
         if len(articles) >= n_results * 2:
@@ -378,8 +414,9 @@ def _rag_retrieve(query: str, n_results: int = 12) -> list[dict]:
             if score < _MIN_SCORE:
                 continue  # dense bilang tidak relevan — buang
         else:
-            # BM25-only: lolos hanya bila ada bukti kata kunci kuat
-            if did not in set(lex_ids[:10]):
+            # BM25-only: lolos hanya bila ada bukti kata kunci kuat —
+            # kecuali pinned (identitas persis, bukti lebih kuat).
+            if did not in pinned and did not in set(lex_ids[:10]):
                 continue
             meta = id2meta.get(did)
             doc = id2doc.get(did, "")
