@@ -257,8 +257,13 @@ Membangun landasan hukum komprehensif yang relevan dengan query pengguna. Agen i
       env RERANKER_MODEL) mengurutkan top-48 kandidat — MRR@10
       terukur 0.244→0.400; skor hanya mengatur urutan, bukan
       relevance_score (skala abstention tetap cosine dense)
+   e2. Pin sitasi eksplisit: UU+Pasal yang disebut query disuntik
+      ke kandidat walau absen dari dense+lex dan di-pin di atas
+      reranker; primat peraturan — chunk yurisprudensi di belakang
+      UU/doktrin pada query generik (UU primer, putusan persuasif)
    f. Indeks BM25 tersnapshot ke disk (BM25_INDEX_PATH) — cold-start
-      tak rebuild >100K chunk; invalidate pasca-ingest
+      tak rebuild >100K chunk; invalidate pasca-ingest; fetch
+      dua-tahap (ids per-halaman → batch 4K) untuk koleksi >32K
 3. Query Neo4j untuk cross-references LINTAS UU
 4. ABSTENTION (pola regulated-rag/policyproof): tolak menjawab jika
    bukti lemah — nol pasal, skor teratas <0.55, atau SEMUA sitasi di
@@ -888,6 +893,9 @@ systemctl --user enable --now ala-postgres ala-chroma ala-neo4j ala-api ala-fron
 #   (400 QA dari horelulus/ID_REG_QA_Small). Metrik: coverage,
 #   HitRate@k, MRR. Progres terukur (korpus ~160 dok): baseline 0.20 →
 #   +mention-boost 0.467 HitRate → +reranker MRR 0.244→0.400.
+#   Setelah 2.000 putusan masuk (korpus ~2.155 dok / ~117K chunk):
+#   HitRate 0.400, MRR 0.367 — primat peraturan menahan banjir
+#   putusan; recall sisanya gap coverage, bukan ranking.
 
 # Grounding & abstention (legal_foundation.py):
 #   _audit_citations kini 3 sumbu — eksistensi, fidelity, TEMPORAL

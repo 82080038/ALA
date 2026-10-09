@@ -38,7 +38,7 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 | 1.9 | ALCD: Graph Builder | `backend/app/agents/alcd/graph_builder.py` — `LegalArticle` + `CROSS_REFERENCES` di Neo4j | ✅ Done |
 | 1.10 | ALCD: Self-Evaluator | `backend/app/agents/evaluator.py` — deterministik (registry ∩ kanonik) + `scripts/eval_gold.py` (P@k/MRR gold) | ✅ Done |
 | 1.11 | ALCD: Curriculum Agent | `backend/app/agents/curriculum_designer.py` — pipeline: ontologi → doktrin → korpus terverifikasi → crawl celah → evaluasi | ✅ Done |
-| 1.12 | Bootstrap Test | Bootstrap dari nol terverifikasi: 163 dokumen, 16.757 chunk, skor 0.916 (Okt 2026) | ✅ Done |
+| 1.12 | Bootstrap Test | Bootstrap dari nol terverifikasi: 2.155 dokumen (incl. 2.000 putusan MA pidana), ~116.800 chunk, skor 0.916 (Okt 2026) | ✅ Done |
 | 1.13 | Doctrine Foundation | `alcd/doctrine.py` — 21 konsep ilmu hukum berjenjang, kategori `doktrin` | ✅ Done |
 | 1.14 | External Corpus Importer | `alcd/external_corpus.py` — `spkt://` `lexisai://` `aph://` `hf://laws` `hf://putusan`, idempotent | ✅ Done |
 
