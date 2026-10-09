@@ -95,6 +95,11 @@ def _save_bm25_snapshot() -> None:
 _BM25_ID_PAGE = 10_000
 _BM25_GET_BATCH = 4_000  # < batas variabel sqlite Chroma (~32K)
 
+# Query yang memang meminta case law — putusan TIDAK diturunkan.
+_CASE_LAW_RE = re.compile(
+    r"putusan|yurisprudensi|preseden|preceden|jurisprudensi|"
+    r"fatwa|penetapan|doktrin\s+putusan", re.IGNORECASE)
+
 
 def invalidate_lexical_index() -> None:
     """Dipanggil ingestor setelah upsert — chunk baru/terubah memaksa
@@ -392,6 +397,16 @@ def _rag_retrieve(query: str, n_results: int = 12) -> list[dict]:
     # Cross-encoder rerank atas kandidat teratas — presisi kontekstual
     # pasangan (query, pasal) yang tak tertangkap bi-encoder E5.
     ordered = _rerank(query, fused, dense_meta, id2doc)
+    # Primat peraturan PASKA-rerank (reranker akan membatalkan demosi
+    # pra-rerank): kecuali query memang meminta case law, chunk
+    # yurisprudensi ditempatkan di belakang peraturan/doktrin —
+    # undang-undang otoritas primer, putusan persuasif. Banjir
+    # putusan (korpus terbesar) tidak boleh menenggelamkan pasal
+    # pada query generik; putusan tetap hadir, hanya berikutnya.
+    if not _CASE_LAW_RE.search(query):
+        ordered.sort(
+            key=lambda kv: (id2meta.get(kv[0]) or {}).get(
+                "law_category") == "yurisprudensi")
     # Pin deterministik pasca-rerank: bila query menyebut UU+Pasal
     # secara eksplisit, dokumen yang identitasnya cocok PERSIS harus
     # mendahului — reranker semantik tidak boleh menenggelamkan

@@ -61,8 +61,12 @@ def _get_embedder():
     return _embedder
 
 
-def chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
-    """Potong teks menjadi chunks 500 char dengan overlap 50."""
+def chunk_text(text: str, size: int = _CHUNK_SIZE,
+               overlap: int = _CHUNK_OVERLAP,
+               limit: int | None = None) -> list[str]:
+    """Potong teks menjadi chunks 500 char dengan overlap 50.
+    `limit` menghentikan pemotongan lebih awal — teks patologis
+    (ratusan MB) tidak dimaterialisasi penuh ke memori."""
     chunks = []
     start = 0
     while start < len(text):
@@ -70,6 +74,8 @@ def chunk_text(text: str, size: int = _CHUNK_SIZE, overlap: int = _CHUNK_OVERLAP
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
+            if limit is not None and len(chunks) >= limit:
+                break
         start += size - overlap
     return chunks
 
@@ -103,13 +109,15 @@ def ingest_parsed_document(
     ids, docs, metas = [], [], []
     truncated = 0
     for article in parsed["articles"]:
-        chunks = chunk_text(article["content"])
         # Batas per-artikel: seksi patologis (transkrip fakta putusan
         # ratusan halaman) tetap masuk tetapi tidak menghabiskan
-        # belasan menit embedding CPU — kepalanya cukup untuk retrieval.
-        if len(chunks) > _MAX_CHUNKS_PER_ARTICLE:
-            truncated += len(chunks) - _MAX_CHUNKS_PER_ARTICLE
-            chunks = chunks[:_MAX_CHUNKS_PER_ARTICLE]
+        # belasan menit chunking+embedding CPU — kepalanya cukup
+        # untuk retrieval. limit di-pass agar daftar chunk tidak
+        # dimaterialisasi penuh dari teks multi-MB.
+        if len(article["content"]) > _MAX_CHUNKS_PER_ARTICLE * _CHUNK_SIZE:
+            truncated += len(article["content"]) // _CHUNK_SIZE
+        chunks = chunk_text(article["content"],
+                            limit=_MAX_CHUNKS_PER_ARTICLE)
         for i, chunk in enumerate(chunks):
             ids.append(_doc_id(law_name, article["article_number"], i))
             docs.append(chunk)
