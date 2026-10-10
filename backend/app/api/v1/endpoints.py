@@ -903,9 +903,13 @@ async def alcd_ontology(db: Session = Depends(get_db)):
         _topic_keywords,
     )
 
-    # law_name registry → index wilayah (sumber relasi = dokumen ingest)
+    # law_name registry → index wilayah (sumber relasi = dokumen ingest).
+    # Kunci dinormalisasi karena _region_of melowercase ref sebelum
+    # lookup — nama registry ber-huruf besar (…Pemberantasan TPPU)
+    # tanpa ini tak pernah cocok identitas.
     law_region = {
-        r.law_name: i for i, lws in node_laws.items() for r in lws}
+        (r.law_name or "").strip().lower(): i
+        for i, lws in node_laws.items() for r in lws}
     topic_words = [
         _topic_keywords(
             _CANONICAL_LAW_NAMES.get(
@@ -941,16 +945,26 @@ async def alcd_ontology(db: Session = Depends(get_db)):
             # gelamkan tipe minoritas (CITES putusan kalah oleh ribuan
             # CROSS_REFERENCES antar-pasal UU).
             for rec in s.run(
+                # Maks 3 edge per pasangan (UU sumber → UU target) agar
+                # sampel mewakili SEMUA UU yang terhubung — LIMIT
+                # arbitrer pada edge mentah bias ke UU paling sering
+                # disitasi (KUHP) dan menyembunyikan wilayah minoritas.
                 "MATCH (a:LegalArticle)-[r:CROSS_REFERENCES]->"
                 "(b:LegalArticle) "
-                "RETURN a.law_name AS fl, a.article_number AS fa, "
-                "b.law_name AS tl, b.article_number AS ta, "
-                "type(r) AS rel LIMIT 250 "
+                "WITH a.law_name AS fl, b.law_name AS tl, "
+                "collect({fa: a.article_number, "
+                "ta: b.article_number})[..3] AS items "
+                "UNWIND items AS it "
+                "RETURN fl, it.fa AS fa, tl, it.ta AS ta, "
+                "'CROSS_REFERENCES' AS rel LIMIT 250 "
                 "UNION "
                 "MATCH (a:LegalArticle)-[r:CITES]->(b:LegalArticle) "
-                "RETURN a.law_name AS fl, a.article_number AS fa, "
-                "b.law_name AS tl, b.article_number AS ta, "
-                "type(r) AS rel LIMIT 250"
+                "WITH a.law_name AS fl, b.law_name AS tl, "
+                "collect({fa: a.article_number, "
+                "ta: b.article_number})[..3] AS items "
+                "UNWIND items AS it "
+                "RETURN fl, it.fa AS fa, tl, it.ta AS ta, "
+                "'CITES' AS rel LIMIT 250"
             ):
                 fr = _region_of(rec["fl"], None)
                 tr = _region_of(rec["tl"], fr)
