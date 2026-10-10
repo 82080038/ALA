@@ -159,7 +159,8 @@ GET /api/v1/analyze-trend/{request_id}
     "knowledge_ready": true,
     "knowledge_score": 0.97,
     "legal_summary": "...",
-    "legal_articles": [{"law_name": "UU TPPU", "article_number": "Pasal 3", "relevance_score": 0.96}],
+    "legal_articles": [{"law_name": "UU TPPU", "article_number": "Pasal 3", "relevance_score": 0.96,
+      "elements": {"pelaku": "Setiap Orang", "sikap_batin": [], "ancaman": {"penjara": {"maks": 20.0}}}],
     "cross_references": [{"from_article": "...", "to_article": "...", "relationship": "CROSS_REFERENCES"}],
     "crime_summary": "...",
     "crime_data": [{"title": "...", "url": "...", "snippet": "..."}],
@@ -171,7 +172,9 @@ GET /api/v1/analyze-trend/{request_id}
 }
 ```
 
-`status: "failed"` disertai `error`. Job tenant lain → `404` (tidak bisa di-probe). Registry in-memory — job hilang saat restart API; jejak permanen tetap di `ai_audit_logs`.
+`status: "failed"` disertai `error`. Job tenant lain → `404` (tidak bisa di-probe). Registry in-memory — hasil job yang hilang saat restart API **dipulihkan dari `ai_audit_logs`** (`recovered_from_audit: true`, tetap RLS-scoped).
+
+Field opsional `legal_articles[]`: `elements` (skema unsur delik — `pelaku`/`perbuatan`/`sikap_batin`/`ancaman`, hanya pasal pidana) dan `kaidah` (ratio/amar terstruktur, hanya seksi putusan MA).
 
 ### 2b. Aktivitas Real-Time
 

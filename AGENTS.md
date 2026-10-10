@@ -50,6 +50,9 @@ class LegalArticle(TypedDict):
     title: str
     content: str
     relevance_score: float
+    # NotRequired: source_url, topic,
+    #   elements — skema unsur delik (hanya pasal pidana),
+    #   kaidah — ratio/amar terstruktur (hanya seksi putusan MA)
 
 class CrossReference(TypedDict):
     from_article: str

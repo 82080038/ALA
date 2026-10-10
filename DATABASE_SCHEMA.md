@@ -375,6 +375,8 @@ Setiap dokumen dalam koleksi memiliki:
 | `source_url` | `string` | Provenance: `https://` (crawl resmi), `spkt://`, `lexisai://`, `aph://`, `hf://` |
 | `discovery_date` | `string` | Tanggal dokumen ditemukan (ISO 8601) |
 | `verified` | `boolean` | Apakah konten terverifikasi lintas minimal 2 sumber |
+| `elements` | `string` (JSON) | Opsional — skema unsur delik `{"pelaku", "perbuatan", "sikap_batin": [], "ancaman": {"penjara": {"min"/"maks"/"seumur_hidup"}, "denda_rp"}, "pemberatan", "dipidana_di"}` hasil `alcd/element_parser.py`; hanya pasal yang memuat `dipidana`/`diancam`. Ancaman = agregat seluruh ayat pasal (min terkecil, maks terbesar) |
+| `kaidah` | `string` (JSON) | Opsional — kaidah putusan `{"ratio_decidendi": [], "pasal_pertimbangan": [], "amar": {"terbukti", "frasa_terbukti"/"status", "pasal_amar", "hukuman", "diksi"}}` hasil `alcd/putusan_kaidah.py`; hanya chunk seksi `Pertimbangan Hukum` putusan MA |
 
 ### 2.4 Chunking Strategy
 
@@ -436,7 +438,7 @@ CREATE (a:LegalArticle {
 | Property | Tipe | Deskripsi |
 |----------|------|-----------|
 | `law_name` | string | Nama UU |
-| `article_number` | string | Nomor pasal |
+| `article_number` | string | Nomor pasal (atau judul seksi putusan: `Pertimbangan Hukum`, `Amar Putusan`, …; atau `Konsiderans` untuk preambel) |
 | `title` | string | Judul pasal |
 | `content` | string | Isi lengkap pasal |
 | `ayat` | string | Ayat spesifik (jika ada) |
@@ -444,6 +446,21 @@ CREATE (a:LegalArticle {
 | `penalty_min` | string | Pidana minimum |
 | `penalty_max` | string | Pidana maksimum |
 | `fine_max` | string | Denda maksimum |
+| `elements` | string (JSON) | Opsional — skema unsur delik, sama dengan metadata Chroma `elements` |
+| `kaidah` | string (JSON) | Opsional — kaidah putusan lengkap; hanya pada node seksi `Pertimbangan Hukum` putusan MA |
+| `amar` | string (JSON) | Opsional — amar terstruktur; hanya pada node seksi `Amar Putusan` putusan MA |
+
+#### `LegalDoc` *(GLOBAL — simpul level-dokumen untuk relasi normatif)*
+```cypher
+CREATE (d:LegalDoc {
+    name: "UU Nomor 35 Tahun 2009 tentang Narkotika",
+    scope: "GLOBAL"
+})
+```
+
+| Property | Tipe | Deskripsi |
+|----------|------|-----------|
+| `name` | string | Nama kanonik peraturan sesuai `knowledge_registry.law_name` |
 
 #### `Suspect` *(TENANT — wajib `institution_id`)*
 ```cypher
@@ -508,11 +525,30 @@ CREATE (ct:CrimeTrend {
 -- Referensi silang antar pasal
 (a1:LegalArticle)-[:CROSS_REFERENCES {context: "akses ilegal"}]->(a2:LegalArticle)
 
+-- Sitasi putusan → pasal yang dikutip (diresolve ke nama kanonik registry)
+(putusan:LegalArticle {article_number: "Pertimbangan Hukum"})
+    -[:CITES]->(pasal:LegalArticle)
+
+-- Dasar hukum dokumen (konsiderans "Mengingat: UU …") — diekspos ke
+-- endpoint ontologi sebagai rel `LEGAL_BASIS`
+(perkap:LegalArticle {article_number: "Konsiderans"})
+    -[:CITES]->(dasar:LegalArticle)
+
 -- Kontradiksi antar pasal
 (a1:LegalArticle)-[:CONTRADICTS {note: "definisi berbeda"}]->(a2:LegalArticle)
 
 -- Pasal menggantikan pasal lain (lex specialis)
 (a1:LegalArticle)-[:SUPERSEDES {effective_date: date("2023-01-01")}]->(a2:LegalArticle)
+
+-- Amandemen/pencabutan level dokumen (dari klausul teks; arah: pencabut
+-- → yang dicabut)
+(baru:LegalDoc)-[:REVOKES]->(lama:LegalDoc)   -- bila teks: "mencabut"
+(baru:LegalDoc)-[:AMENDS]->(lama:LegalDoc)    -- bila teks: "mengubah"
+
+-- Hirarki normatif (scripts/build_norm_hierarchy.py — idempotent)
+(uu_dasar:LegalDoc)-[:SUPERIOR_TO]->(peraturan_pelaksana:LegalDoc)
+(uu_baru:LegalDoc)-[:NEWER_THAN]->(uu_lama:LegalDoc)
+(uu_sektoral:LegalDoc)-[:SPECIALIS_OF {co_cited: 12}]->(kuhp:LegalDoc)
 
 -- Kepemilikan rekening
 (s:Suspect)-[:OWNS {since: date("2020-06-15")}]->(b:BankAccount)

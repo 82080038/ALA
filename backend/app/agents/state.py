@@ -8,7 +8,7 @@ Developer) membaca dan memperbarui state ini secara sekuensial.
 agen menambahkan (append) entri baru, bukan menimpa.
 """
 import operator
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, NotRequired, Optional, TypedDict
 
 
 class CrimeSource(TypedDict):
@@ -24,6 +24,11 @@ class LegalArticle(TypedDict):
     title: str
     content: str
     relevance_score: float
+    source_url: NotRequired[str]
+    topic: NotRequired[str]
+    # Opsional — struktur hukum formal (hanya bila ada di metadata):
+    elements: NotRequired[dict]  # pelaku/perbuatan/sikap_batin/ancaman
+    kaidah: NotRequired[dict]    # putusan: ratio/pasal/amar terstruktur
 
 
 class CrossReference(TypedDict):

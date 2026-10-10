@@ -38,9 +38,12 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 | 1.9 | ALCD: Graph Builder | `backend/app/agents/alcd/graph_builder.py` — `LegalArticle` + `CROSS_REFERENCES` di Neo4j | ✅ Done |
 | 1.10 | ALCD: Self-Evaluator | `backend/app/agents/evaluator.py` — deterministik (registry ∩ kanonik) + `scripts/eval_gold.py` (P@k/MRR gold) | ✅ Done |
 | 1.11 | ALCD: Curriculum Agent | `backend/app/agents/curriculum_designer.py` — pipeline: ontologi → doktrin → korpus terverifikasi → crawl celah → evaluasi | ✅ Done |
-| 1.12 | Bootstrap Test | Bootstrap dari nol terverifikasi: 2.155 dokumen (incl. 2.000 putusan MA pidana), ~116.800 chunk, skor 0.916 (Okt 2026) | ✅ Done |
+| 1.12 | Bootstrap Test | Bootstrap dari nol terverifikasi: 2.157 dokumen (incl. 2.000 putusan MA pidana + Perkap/Perpol), ~117K chunk, skor 0.916 (Okt 2026) | ✅ Done |
 | 1.13 | Doctrine Foundation | `alcd/doctrine.py` — 21 konsep ilmu hukum berjenjang, kategori `doktrin` | ✅ Done |
 | 1.14 | External Corpus Importer | `alcd/external_corpus.py` — `spkt://` `lexisai://` `aph://` `hf://laws` `hf://putusan`, idempotent | ✅ Done |
+| 1.15 | Unsur Delik Parser | `alcd/element_parser.py` — parse deterministik rumusan pidana → skema unsur (pelaku/perbuatan/sikap batin/ancaman); `elements` di Chroma+Neo4j+prompt; 4.500 pasal delik | ✅ Done |
+| 1.16 | Kaidah Putusan | `alcd/putusan_kaidah.py` — ratio decidendi per-klausa menimbang + amar terstruktur; 430 node + 16.345 chunk membawa `kaidah` | ✅ Done |
+| 1.17 | Benchmark Struktur | `tests/gold/ala_unsur.jsonl` + `scripts/eval_unsur.py` (10/10 OK, metrik 1.0) + `scripts/eval_kaidah.py` | ✅ Done |
 
 ### Kriteria Keberhasilan
 - ✅ Docker Compose berjalan stabil dengan semua 3 database services
@@ -85,13 +88,14 @@ Bulan 1─2      Bulan 3─4      Bulan 5─6      Bulan 7─8      Bulan 9+
 
 | # | Task | Deliverable | Status |
 |---|------|-------------|--------|
-| 3.1 | Desain graph schema Neo4j | Node `LegalArticle` + rel `CROSS_REFERENCES` | ✅ Done |
-| 3.2 | Verifikasi graph ALCD | 8.592 node / 3.661 edge rujukan nyata terverifikasi | ✅ Done |
+| 3.1 | Desain graph schema Neo4j | Node `LegalArticle` + `LegalDoc` + rel `CROSS_REFERENCES`/`CITES`/normatif | ✅ Done |
+| 3.2 | Verifikasi graph ALCD | 12.084 node / 5.318 edge (3.678 CROSS_REFERENCES + 1.565 CITES + 485 normatif) | ✅ Done |
 | 3.3 | Integrasi Neo4j ke Legal Agent | Query graph untuk cross-references dalam analisis | ✅ Done |
+| 3.3b | Hirarki normatif | `scripts/build_norm_hierarchy.py` — SUPERIOR_TO/NEWER_THAN/SPECIALIS_OF berbasis bukti (CITES, lex posteriori, kurasi+co-sitasi); idempotent | ✅ Done |
 | 3.4 | Docker Sandbox setup | `sandbox/Dockerfile` (image terkunci), `backend/app/sandbox/execution_env.py` | ✅ Done |
 | 3.5 | Guardrail Filter | `backend/app/sandbox/guardrails.py` — malicious pattern scanner | ✅ Done |
 | 3.6 | Approval workflow endpoint | `POST /api/v1/approve-workflow` + audit logging | ✅ Done |
-| 3.7 | Unit & integration tests | `tests/` — 26 pass, 3 skip | ✅ Done |
+| 3.7 | Unit & integration tests | `tests/` — 55 pass, 3 skip | ✅ Done |
 
 ### Kriteria Keberhasilan
 - ✅ Neo4j graph berisi minimal 50 relasi cross-reference antar pasal
@@ -203,3 +207,23 @@ terukur. Detail lengkap di AGENTS.md §10:
   `ID_REG_MD_RAG`).
 - **Embedding configurable** — `settings.embedding_model`; jalur
   upgrade terdokumentasi ke e5-indo / BGE-M3-ind (wajib re-embed).
+
+### Struktur hukum formal (Okt 2026)
+
+Ditambahkan di luar rencana awal untuk menaikkan kompetensi di atas
+retrieval-parafrase — semua deterministik, tanpa LLM:
+
+- **Unsur delik** (`alcd/element_parser.py`) — rumusan pidana → skema
+  unsur; `elements` di metadata Chroma, properti Neo4j, artikel
+  retrieval, dan prompt synthesis. Backfill join-chunk: 4.500 pasal
+  delik / 39.726 chunk / 2.109 node.
+- **Hirarki normatif** (`scripts/build_norm_hierarchy.py`) — edge
+  `LegalDoc`: SUPERIOR_TO dari sitasi dasar hukum, NEWER_THAN lex
+  posteriori satu wilayah+subjek, SPECIALIS_OF kurasi doktrin + bukti
+  co-sitasi putusan.
+- **Kaidah putusan** (`alcd/putusan_kaidah.py`) — ratio decidendi
+  per-klausa menimbang, pasal pertimbangan, amar terstruktur
+  (terbukti/status/hukuman/diksi) → properti `kaidah`/`amar` di Neo4j
+  + metadata `kaidah` di Chroma.
+- **Benchmark** — `ala_unsur.jsonl` (10 kasus, semua metrik 1.0),
+  `eval_unsur.py`, `eval_kaidah.py` (coverage & distribusi outcome).

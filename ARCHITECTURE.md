@@ -131,6 +131,7 @@ ALA menggunakan **tiga jenis database** yang masing-masing dioptimalkan untuk us
 3. **Korpus terverifikasi** (`external_corpus.py`): SPKT `spkt://` (UU+rujukan+putusan MK), LexisAI `lexisai://` (re-embed), riset APH `aph://` (30 dok kurasi), HuggingFace `hf://laws` (1.924 UU/105K pasal JDIH BPK), `hf://putusan` (putusan MA terstruktur)
 4. **Crawl otonom** hanya untuk celah yang tersisa: Google Search → unduh (HTML/PDF, OCR fallback ocrmypdf+tesseract `ind`) → parse (Bab/Bagian/Paragraf/Pasal + klausa TENTANG) → verifikasi identitas↔isi & status≠dicabut
 5. Chunk → embedding E5 → ChromaDB + graph rujukan → Neo4j + registry → evaluasi deterministik (`_EXPECTED_LAW_IDS` + registry — LLM-judge hanya ke `self_eval_logs`)
+6. **Struktur formal pasca-ingest**: `element_parser` menempelkan unsur delik (`elements`) ke chunk pasal pidana + node Neo4j; `putusan_kaidah` menempelkan ratio/amar (`kaidah`) ke seksi putusan; `build_norm_hierarchy` membangun rel `LegalDoc` (SUPERIOR_TO/NEWER_THAN/SPECIALIS_OF)
 
 > **NOTE:** There are NO pre-loaded documents. The `data/` directory only holds caches (HF parquet di `backend/data/hf/`). All legal data is acquired autonomously — via verified corpora first, crawl only for residual gaps.
 
@@ -167,7 +168,8 @@ ALA menggunakan **tiga jenis database** yang masing-masing dioptimalkan untuk us
 
 | Node Label | Scope | Properties | Deskripsi |
 |------------|-------|-----------|-----------|
-| `LegalArticle` | **GLOBAL** | `law_name`, `article_number`, `title`, `content` | Pasal hukum — dibagikan semua institusi |
+| `LegalArticle` | **GLOBAL** | `law_name`, `article_number`, `title`, `content`, `elements`?, `kaidah`?, `amar`? | Pasal hukum / seksi putusan — dibagikan semua institusi; `elements` = unsur delik JSON, `kaidah`/`amar` = kaidah putusan terstruktur |
+| `LegalDoc` | **GLOBAL** | `name`, `scope` | Simpul level-peraturan untuk relasi normatif (hirarki/amandemen) |
 | `Suspect` | **TENANT** | `institution_id`, `name`, `alias`, `id_number` | Tersangka — terisolasi per institusi |
 | `BankAccount` | **TENANT** | `institution_id`, `bank_name`, `account_number`, `holder_name` | Rekening bank |
 | `IPAddress` | **TENANT** | `institution_id`, `address`, `isp`, `location` | Alamat IP |
@@ -179,8 +181,13 @@ ALA menggunakan **tiga jenis database** yang masing-masing dioptimalkan untuk us
 | Relationship | Dari → Ke | Deskripsi |
 |-------------|-----------|-----------|
 | `CROSS_REFERENCES` | LegalArticle → LegalArticle | Referensi silang antar pasal |
+| `CITES` | LegalArticle → LegalArticle | Sitasi nyata: putusan→pasal yang dikutip; juga dasar hukum konsiderans (diekspos sebagai `LEGAL_BASIS` di `/alcd/ontology`) |
 | `CONTRADICTS` | LegalArticle → LegalArticle | Kontradiksi antar pasal |
 | `SUPERSEDES` | LegalArticle → LegalArticle | Pasal menggantikan pasal lain |
+| `REVOKES` / `AMENDS` | LegalDoc → LegalDoc | Pencabutan/amandemen dari klausul teks (arah: pencabut→dicabut) |
+| `SUPERIOR_TO` | LegalDoc → LegalDoc | UU dasar hukum → peraturan pelaksana (dari CITES konsiderans) |
+| `NEWER_THAN` | LegalDoc → LegalDoc | Lex posteriori: satu wilayah ontologi + subjek sama + tahun lebih baru |
+| `SPECIALIS_OF` | LegalDoc → LegalDoc | Lex specialis: UU pidana sektoral → KUHP (+`co_cited` bukti empiris) |
 | `OWNS` | Suspect → BankAccount | Kepemilikan rekening |
 | `USES_IP` | Suspect → IPAddress | Penggunaan IP address |
 | `USES_PHONE` | Suspect → PhoneNumber | Penggunaan nomor telepon |
@@ -193,8 +200,9 @@ ALA adalah platform B2B SaaS multi-institusi, tetapi **basis pengetahuan hukum b
 
 ```
 ┌────────────────────────── GLOBAL (shared, no institution_id) ──────────────────────────┐
-│  ChromaDB `indonesian_laws`  │  Neo4j LegalArticle + CROSS_REFERENCES/CONTRADICTS/    │
-│  (KUHP, KUHAP, UU ITE, ...)  │  SUPERSEDES + CrimeTrend                                │
+│  ChromaDB `indonesian_laws`  │  Neo4j LegalArticle (CROSS_REFERENCES/CITES/CONTRADICTS/ │
+│  (KUHP, KUHAP, UU ITE, ...)  │  SUPERSEDES) + LegalDoc (SUPERIOR_TO/NEWER_THAN/        │
+│                              │  SPECIALIS_OF/REVOKES/AMENDS) + CrimeTrend             │
 │  PostgreSQL: knowledge_registry, ontology_nodes, self_eval_logs                        │
 └───────────────────────────────────────────────────────────────────────────────────────┘
 ┌──────────────────── TENANT (wajib institution_id + RLS) ───────────────────────────────┐
