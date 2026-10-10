@@ -121,7 +121,11 @@ Membangun basis pengetahuan hukum dari **NOL DATA**. Agen ini berjalan sebelum q
 | `alcd/source_discoverer.py` | Cari repositori hukum resmi via Google Search |
 | `alcd/document_parser.py` | Unduh, parse HTML/PDF, ekstrak konten terstruktur |
 | `alcd/autonomous_ingestor.py` | Chunk teks, generate embedding (model via `settings.embedding_model`), simpan ke ChromaDB |
-| `alcd/graph_builder.py` | Identifikasi cross-references, bangun relasi di Neo4j: `CROSS_REFERENCES` (pasal→pasal lintas UU), `CITES` (putusan→pasal yang disitasi, resolver `build_law_name_map` ke nama kanonik registry), `REVOKES`/`AMENDS` antar-`LegalDoc` |
+| `alcd/graph_builder.py` | Identifikasi cross-references, bangun relasi di Neo4j: `CROSS_REFERENCES` (pasal→pasal lintas UU), `CITES` (putusan→pasal yang disitasi + dasar hukum konsiderans; resolver `build_law_name_map` ke nama kanonik registry), `REVOKES`/`AMENDS` antar-`LegalDoc`; properti `elements` (unsur delik JSON) pada node pasal |
+| `alcd/element_parser.py` | Parse deterministik rumusan pidana → skema unsur (pelaku/perbuatan/sikap batin/ancaman) — tanpa LLM; metadata `elements` di Chroma + Neo4j |
+| `alcd/putusan_kaidah.py` | Ekstraksi struktural kaidah putusan: `ratio_decidendi` per-klausa menimbang, `pasal_pertimbangan`, amar terstruktur (terbukti/status/hukuman/diksi) |
+| `scripts/build_norm_hierarchy.py` | Hirarki normatif antar-`LegalDoc`: `SUPERIOR_TO` (dari CITES dasar hukum), `NEWER_THAN` (lex posteriori satu wilayah+subjek), `SPECIALIS_OF` (kurasi doktrin + bukti co-sitasi) |
+| `scripts/eval_unsur.py`, `scripts/eval_kaidah.py` | Benchmark struktur hukum — unsur delik vs gold `ala_unsur.jsonl`, coverage kaidah putusan |
 | `alcd/doctrine.py` | 21 konsep ilmu hukum berjenjang — fondasi sebelum pasal |
 | `alcd/external_corpus.py` | Impor korpus terverifikasi: `spkt://` `lexisai://` `aph://` `hf://laws` `hf://putusan` |
 | `bm25.py` | Indeks BM25 lokal (stopword Indonesia) — lapis leksikal hybrid retrieval |
@@ -261,6 +265,9 @@ Membangun landasan hukum komprehensif yang relevan dengan query pengguna. Agen i
       ke kandidat walau absen dari dense+lex dan di-pin di atas
       reranker; primat peraturan — chunk yurisprudensi di belakang
       UU/doktrin pada query generik (UU primer, putusan persuasif)
+   e3. Skema unsur delik: metadata `elements` tiap pasal dibawa ke
+      prompt sebagai baris `UNSUR: pelaku=…; perbuatan=…; sikap=…;
+      ancaman=…` — synthesis dipandu pemetaan fakta→unsur
    f. Indeks BM25 tersnapshot ke disk (BM25_INDEX_PATH) — cold-start
       tak rebuild >100K chunk; invalidate pasca-ingest; fetch
       dua-tahap (ids per-halaman → batch 4K) untuk koleksi >32K

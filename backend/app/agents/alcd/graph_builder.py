@@ -29,15 +29,24 @@ def upsert_legal_articles(driver, law_name: str, articles: list[dict]) -> int:
     SET a.content = art.content,
         a.title = coalesce(art.title, ''),
         a.scope = 'GLOBAL',
-        a.updated_at = datetime()
+        a.updated_at = datetime(),
+        a.elements = coalesce(art.elements, a.elements)
     RETURN count(a) AS n
     """
+    import json as _json
+    from app.agents.alcd.element_parser import extract_elements
+
     with driver.session() as session:
         result = session.run(
             query, law_name=law_name,
             articles=[{"article_number": a["article_number"],
                        "content": a["content"][:4000],
-                       "title": a.get("title", "")} for a in articles],
+                       "title": a.get("title", ""),
+                       "elements": (
+                           _json.dumps(extract_elements(a["content"]),
+                                       ensure_ascii=False)
+                           if extract_elements(a["content"]) else None)}
+                      for a in articles],
         )
         return result.single()["n"]
 

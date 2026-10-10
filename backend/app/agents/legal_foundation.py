@@ -6,6 +6,7 @@ Pencarian pertama SELALU di basis pengetahuan hukum GLOBAL: ChromaDB
 referensi silang. Query pengguna tidak pernah langsung masuk ke web
 scraper atau code generator.
 """
+import json
 import logging
 import pickle
 import re
@@ -442,14 +443,28 @@ def _rag_retrieve(query: str, n_results: int = 12) -> list[dict]:
         if key in seen_art:
             continue
         seen_art.add(key)
-        articles.append({
+        art = {
             "law_name": meta.get("law_name", "Unknown"),
             "article_number": meta.get("article_number", ""),
             "content": doc,
             "relevance_score": round(score, 3),
             "source_url": meta.get("source_url", ""),
             "topic": meta.get("topic", ""),
-        })
+        }
+        if meta.get("elements"):
+            # Skema unsur delik — dibawa ke synthesis agar jawaban
+            # berbentuk pemetaan fakta→unsur, bukan prosa bebas.
+            try:
+                art["elements"] = json.loads(meta["elements"])
+            except Exception:
+                pass
+        if meta.get("kaidah"):
+            # Kaidah putusan — ratio/amar struktural ikut retrieval.
+            try:
+                art["kaidah"] = json.loads(meta["kaidah"])
+            except Exception:
+                pass
+        articles.append(art)
     return articles[:n_results]
 
 
@@ -543,10 +558,20 @@ def _summarize_legal(query: str, articles: list[dict]) -> str:
     """Ringkas landasan hukum via LLM penalaran (GPU 0)."""
     if not articles:
         return ""
-    art_text = "\n".join(
-        f"- {a['law_name']} {a['article_number']}: {a['content'][:700]}"
-        for a in articles[:8]
-    )
+    def _line(a: dict) -> str:
+        line = (f"- {a['law_name']} {a['article_number']}: "
+                f"{a['content'][:700]}")
+        el = a.get("elements")
+        if el:
+            # Struktur unsur — analisis dipandu skema delik, bukan
+            # parafrase bebas.
+            line += (f"\n  UNSUR: pelaku={el.get('pelaku')}; "
+                     f"perbuatan={el.get('perbuatan')}; "
+                     f"sikap={','.join(el.get('sikap_batin') or [])}; "
+                     f"ancaman={json.dumps(el.get('ancaman'))}")
+        return line
+
+    art_text = "\n".join(_line(a) for a in articles[:8])
     try:
         from app.config import get_llm_reasoning
 

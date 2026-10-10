@@ -7,6 +7,7 @@ sentence-transformers, dan menyimpan ke koleksi ChromaDB GLOBAL
 semua institusi). Setiap dokumen dicatat di `knowledge_registry`.
 """
 import hashlib
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -118,6 +119,11 @@ def ingest_parsed_document(
             truncated += len(article["content"]) // _CHUNK_SIZE
         chunks = chunk_text(article["content"],
                             limit=_MAX_CHUNKS_PER_ARTICLE)
+        # Skema unsur delik — pasal pidana membawa struktur
+        # pelaku/perbuatan/sikap batin/ancaman yang dapat dibaca mesin.
+        from app.agents.alcd.element_parser import extract_elements
+
+        elements = extract_elements(article["content"])
         for i, chunk in enumerate(chunks):
             ids.append(_doc_id(law_name, article["article_number"], i))
             docs.append(chunk)
@@ -132,6 +138,9 @@ def ingest_parsed_document(
                 "discovery_date": datetime.now(timezone.utc).date().isoformat(),
                 "verified": verified,
                 # TIDAK ada institution_id — namespace GLOBAL
+                **({"elements": json.dumps(elements,
+                                           ensure_ascii=False)}
+                   if elements else {}),
             })
 
     if not ids:
