@@ -937,11 +937,20 @@ async def alcd_ontology(db: Session = Depends(get_db)):
 
         driver = get_neo4j_driver()
         with driver.session() as s:
+            # Kuota per tipe relasi — LIMIT tunggal arbitrer akan meneng-
+            # gelamkan tipe minoritas (CITES putusan kalah oleh ribuan
+            # CROSS_REFERENCES antar-pasal UU).
             for rec in s.run(
-                "MATCH (a:LegalArticle)-[r]->(b:LegalArticle) "
+                "MATCH (a:LegalArticle)-[r:CROSS_REFERENCES]->"
+                "(b:LegalArticle) "
                 "RETURN a.law_name AS fl, a.article_number AS fa, "
                 "b.law_name AS tl, b.article_number AS ta, "
-                "type(r) AS rel LIMIT 400"
+                "type(r) AS rel LIMIT 250 "
+                "UNION "
+                "MATCH (a:LegalArticle)-[r:CITES]->(b:LegalArticle) "
+                "RETURN a.law_name AS fl, a.article_number AS fa, "
+                "b.law_name AS tl, b.article_number AS ta, "
+                "type(r) AS rel LIMIT 250"
             ):
                 fr = _region_of(rec["fl"], None)
                 tr = _region_of(rec["tl"], fr)

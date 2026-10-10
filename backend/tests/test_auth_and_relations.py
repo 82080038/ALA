@@ -119,3 +119,33 @@ def test_extract_skips_self_reference():
     t = "Undang-undang ini mencabut Undang-Undang Nomor 1 Tahun 2024."
     rels = _extract_law_relations(t, "1", "2024")
     assert rels == {"revokes": [], "amends": [], "amended_by": []}
+
+
+def test_putusan_citations_resolve_canonical():
+    """Sitasi putusan → law_name kanonik registry; UU tak dikenal dan
+    'UU ini' ditolak; alias KUHP/KUHAP resolve."""
+    from app.agents.alcd.graph_builder import extract_putusan_citations
+
+    law_map = {
+        ("35", "2009"): "UU Nomor 35 Tahun 2009 tentang Narkotika",
+        ("8", "1981"): "UU Nomor 8 Tahun 1981 tentang hukum acara pidana kuhap",
+        ("1", "1946"): "UU Nomor 1 Tahun 1946 tentang hukum pidana kuhp lama",
+        ("8", "2010"): "UU Nomor 8 Tahun 2010 tentang TPPU",
+    }
+    arts = [{
+        "article_number": "Pertimbangan Hukum",
+        "content": (
+            "terdakwa melanggar Pasal 111 ayat (1) UU RI Nomor 35 "
+            "Tahun 2009. Pasal 55 KUHP jo Pasal 183 KUHAP dan Pasal 3 "
+            "UU No. 8 Tahun 2010. Pasal 44 UU No 99 Tahun 2099. "
+            "Pasal 1 undang-undang ini berlaku."),
+    }]
+    refs = extract_putusan_citations(arts, law_map)
+    tgts = {(r["to_law"], r["to_article"]) for r in refs}
+    assert ("UU Nomor 35 Tahun 2009 tentang Narkotika", "Pasal 111") in tgts
+    assert ("UU Nomor 8 Tahun 2010 tentang TPPU", "Pasal 3") in tgts
+    assert ("UU Nomor 1 Tahun 1946 tentang hukum pidana kuhp lama",
+            "Pasal 55") in tgts
+    assert ("UU Nomor 8 Tahun 1981 tentang hukum acara pidana kuhap",
+            "Pasal 183") in tgts
+    assert len(refs) == 4  # 99/2099 dan 'UU ini' tersaring

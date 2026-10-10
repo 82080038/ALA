@@ -728,10 +728,22 @@ def import_external_corpus(db, report=None) -> dict:
     # Putusan MA — yurisprudensi pidana terstruktur (22.630 perkara,
     # dibatasi HF_PUTUSAN_MAX). Dedupe per source_url (id putusan).
     try:
+        from app.agents.alcd.graph_builder import (
+            build_law_name_map, extract_putusan_citations,
+            link_putusan_citations)
+        from app.database.neo4j import get_neo4j_driver
+
         put_docs = list(_hf_putusan_documents())
         existing = set(db.scalars(select(KnowledgeRegistry.source_url)
                        .where(KnowledgeRegistry.source_url.like(
                            "hf://putusan/%"))))
+        # Resolver sitasi dibangun SEKALI — registry hanya bertambah
+        # putusan selama loop ini (target sitasi tidak berubah).
+        law_map = build_law_name_map(db)
+        try:
+            driver = get_neo4j_driver()
+        except Exception:
+            driver = None
         for pi, parsed in enumerate(put_docs):
             if parsed["source_url"] in existing:
                 continue
@@ -745,10 +757,17 @@ def import_external_corpus(db, report=None) -> dict:
                 stats["laws"] += 1
                 stats["chunks"] += res["chunks"]
                 stats["articles"] += res["articles"]
+                if driver:
+                    refs = extract_putusan_citations(
+                        parsed["articles"], law_map)
+                    stats["edges"] += link_putusan_citations(
+                        driver, res["law_name"], parsed["articles"], refs)
             except Exception as exc:
                 db.rollback()
                 logger.warning("Impor putusan HF %s gagal: %s",
                                parsed["source_url"], exc)
+        if driver:
+            driver.close()
     except Exception as exc:
         logger.warning("Impor putusan HF gagal total: %s", exc)
 

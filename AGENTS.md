@@ -121,7 +121,7 @@ Membangun basis pengetahuan hukum dari **NOL DATA**. Agen ini berjalan sebelum q
 | `alcd/source_discoverer.py` | Cari repositori hukum resmi via Google Search |
 | `alcd/document_parser.py` | Unduh, parse HTML/PDF, ekstrak konten terstruktur |
 | `alcd/autonomous_ingestor.py` | Chunk teks, generate embedding (model via `settings.embedding_model`), simpan ke ChromaDB |
-| `alcd/graph_builder.py` | Identifikasi cross-references, bangun relasi di Neo4j |
+| `alcd/graph_builder.py` | Identifikasi cross-references, bangun relasi di Neo4j: `CROSS_REFERENCES` (pasal→pasal lintas UU), `CITES` (putusan→pasal yang disitasi, resolver `build_law_name_map` ke nama kanonik registry), `REVOKES`/`AMENDS` antar-`LegalDoc` |
 | `alcd/doctrine.py` | 21 konsep ilmu hukum berjenjang — fondasi sebelum pasal |
 | `alcd/external_corpus.py` | Impor korpus terverifikasi: `spkt://` `lexisai://` `aph://` `hf://laws` `hf://putusan` |
 | `bm25.py` | Indeks BM25 lokal (stopword Indonesia) — lapis leksikal hybrid retrieval |

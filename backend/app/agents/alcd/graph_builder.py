@@ -67,6 +67,110 @@ def extract_cross_references(articles: list[dict], law_name: str) -> list[dict]:
     return unique
 
 
+# Sitasi dalam putusan: "Pasal 111 ayat (1) UU RI Nomor 35 Tahun 2009",
+# "Pasal 3 UU No. 8 Tahun 2010", "Pasal 55 KUHP". Target di-resolve ke
+# law_name KANONIK registry (bukan teks mentah sitasi — "UU Nomor 35
+# Tahun 2009" ≠ node "UU Nomor 35 Tahun 2009 tentang Narkotika").
+_CITE_UU_RE = re.compile(
+    r"Pasal\s+(\d+[A-Za-z]?)\s+(?:ayat\s*\([^)]*\)\s*)*"
+    r"(?:UU|Undang[-\s]?Undang)(?:\s+RI)?\s+"
+    r"(?:No(?:mor)?\.?\s*)?(\d+)\s+Tahun\s+(\d{4})",
+    re.IGNORECASE,
+)
+_CITE_ALIAS_RE = re.compile(
+    r"Pasal\s+(\d+[A-Za-z]?)\s+(?:ayat\s*\([^)]*\)\s*)*"
+    r"(KUHP|KUHAP)\b",
+    re.IGNORECASE,
+)
+_ALIAS_LAW = {"KUHP": ("1", "1946"), "KUHAP": ("8", "1981")}
+
+
+def build_law_name_map(db) -> dict:
+    """Peta (nomor, tahun) → law_name kanonik registry — resolver untuk
+    sitasi putusan dan referensi silang."""
+    from sqlalchemy import select
+
+    from app.models.operational import KnowledgeRegistry
+
+    out: dict[tuple[str, str], str] = {}
+    rows = db.scalars(
+        select(KnowledgeRegistry).where(
+            KnowledgeRegistry.ingestion_status.in_(
+                ["completed", "verified"]))
+    ).all()
+    for r in rows:
+        key = None
+        yr = (r.metadata_ or {}).get("law_year") if r.metadata_ else None
+        if r.law_number and yr:
+            key = (r.law_number.lstrip("0"), str(yr))
+        else:
+            m = re.search(r"Nomor\s+(\d+)\s+Tahun\s+(\d{4})",
+                          r.law_name or "")
+            if m:
+                key = (m.group(1).lstrip("0"), m.group(2))
+        if key and key not in out:
+            out[key] = r.law_name
+    return out
+
+
+def extract_putusan_citations(
+    articles: list[dict], law_map: dict
+) -> list[dict]:
+    """Ekstrak sitasi pasal→UU dari teks putusan. Hanya sitasi yang
+    targetnya ter-resolve ke dokumen registry (law_map) yang keluar."""
+    refs = []
+    for art in articles:
+        src = art.get("article_number", "")
+        content = art.get("content", "")
+        for m in _CITE_UU_RE.finditer(content):
+            tgt = law_map.get((m.group(2).lstrip("0"), m.group(3)))
+            if tgt:
+                refs.append({
+                    "from_article": src,
+                    "to_law": tgt,
+                    "to_article": f"Pasal {m.group(1)}",
+                })
+        for m in _CITE_ALIAS_RE.finditer(content):
+            key = _ALIAS_LAW.get(m.group(2).upper())
+            tgt = law_map.get(key) if key else None
+            if tgt:
+                refs.append({
+                    "from_article": src,
+                    "to_law": tgt,
+                    "to_article": f"Pasal {m.group(1)}",
+                })
+    seen, unique = set(), []
+    for r in refs:
+        k = (r["from_article"], r["to_law"], r["to_article"])
+        if k not in seen:
+            seen.add(k)
+            unique.append(r)
+    return unique
+
+
+def link_putusan_citations(
+    driver, putusan_name: str, articles: list[dict], refs: list[dict]
+) -> int:
+    """Edge CITES putusan→pasal UU (GLOBAL). Sumber = seksi putusan yang
+    menyitasi (node di-upsert); target harus pasal NYATA di graph —
+    MATCH di kedua ujung, tidak membuat node stub untuk pasal fiktif."""
+    if not refs:
+        return 0
+    citing = {r["from_article"] for r in refs}
+    upsert_legal_articles(
+        driver, putusan_name,
+        [a for a in articles if a["article_number"] in citing])
+    query = """
+    UNWIND $refs AS r
+    MATCH (a:LegalArticle {law_name: $pn, article_number: r.from_article})
+    MATCH (b:LegalArticle {law_name: r.to_law, article_number: r.to_article})
+    MERGE (a)-[:CITES]->(b)
+    RETURN count(*) AS n
+    """
+    with driver.session() as session:
+        return session.run(query, pn=putusan_name, refs=refs).single()["n"]
+
+
 def build_cross_references(driver, refs: list[dict]) -> int:
     """MERGE relasi CROSS_REFERENCES antar LegalArticle (GLOBAL)."""
     if not refs:
