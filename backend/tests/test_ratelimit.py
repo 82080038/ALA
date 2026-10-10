@@ -1,6 +1,8 @@
 """Uji rate limiter — aturan per-method: poller GET /analyze-trend/{id}
 tidak boleh menghabiskan kuota POST analyze-trend (bug: prefix match
-menangkap polling status, 429 pada klien yang sah)."""
+menangkap polling status, 429 pada klien yang sah). Store SQLite
+dipatch ke file temporer per-test."""
+import pytest
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
@@ -11,7 +13,11 @@ from app.middleware import ratelimit
 from app.middleware.ratelimit import RateLimitMiddleware
 
 
-def _app() -> TestClient:
+@pytest.fixture()
+def client(tmp_path):
+    old = ratelimit._DB_PATH
+    ratelimit._DB_PATH = str(tmp_path / "rl_test.db")
+    ratelimit._local.con = None  # paksa koneksi baru di path baru
     ratelimit._hits.clear()
 
     async def ok(request):
@@ -24,20 +30,30 @@ def _app() -> TestClient:
         ],
         middleware=[Middleware(RateLimitMiddleware)],
     )
-    return TestClient(app)
+    yield TestClient(app)
+    ratelimit._DB_PATH = old
+    ratelimit._local.con = None
 
 
-def test_get_status_polling_not_limited():
-    c = _app()
+def test_get_status_polling_not_limited(client):
     for _ in range(15):
-        r = c.get("/api/v1/analyze-trend/req-1")
+        r = client.get("/api/v1/analyze-trend/req-1")
         assert r.status_code == 200, "poller GET ter-limit — regresi"
 
 
-def test_post_limit_still_enforced():
-    c = _app()
+def test_post_limit_still_enforced(client):
     for _ in range(10):
-        assert c.post("/api/v1/analyze-trend").status_code == 200
-    r = c.post("/api/v1/analyze-trend")
+        assert client.post("/api/v1/analyze-trend").status_code == 200
+    r = client.post("/api/v1/analyze-trend")
     assert r.status_code == 429
     assert "Retry-After" in r.headers
+
+
+def test_store_shared_across_connections(client):
+    """State di SQLite → hit terhitung walau koneksi/thread berbeda
+    (simulasi multi-worker)."""
+    ratelimit._local.con = None
+    for _ in range(10):
+        assert client.post("/api/v1/analyze-trend").status_code == 200
+    ratelimit._local.con = None  # 'proses' lain, DB sama
+    assert client.post("/api/v1/analyze-trend").status_code == 429

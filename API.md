@@ -599,7 +599,7 @@ Diterapkan di `app/middleware/ratelimit.py` — sliding window in-memory per (IP
 | `POST /api/v1/approve-workflow` | 20 / menit / IP |
 | `POST /api/v1/alcd/trigger` | 3 / 5 menit / IP |
 
-Endpoint lain saat ini tidak dibatasi (lokal standalone). Tambahkan aturan di `_RULES` bila dibutuhkan; untuk multi-node ganti penyimpanan ke Redis.
+Endpoint lain saat ini tidak dibatasi (lokal standalone). Tambahkan aturan di `_RULES` bila dibutuhkan. Penyimpanan state: SQLite bersama (`RATELIMIT_DB`, default `~/.chroma/ratelimit.db`, mode WAL + `BEGIN IMMEDIATE`) — kuota dihitung benar di semua worker uvicorn pada host yang sama dan bertahan melintasi restart; bila DB gagal, fallback otomatis ke deque in-memory per-proses. Untuk multi-node (beda host) ganti penyimpanan ke Redis.
 
 ---
 

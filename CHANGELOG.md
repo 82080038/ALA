@@ -39,6 +39,8 @@
 - `internet_crawler` — fetch HTTP di-stream dengan batas ~1,5MB (respons raksasa tak lagi dimuat penuh ke memori) dan domain URL **final** dicek ulang setelah redirect (SSRF via tautan RSS → domain terlarang sebelumnya lolos)
 - `endpoints.case_detail` — `GET /api/v1/cases/{case_id}` ditambahkan (didokumentasikan di API.md sejak awal tapi tidak pernah diimplementasikan): detail kasus + riwayat analisis dari audit log, RLS-scoped
 - `API.md` — sinkronisasi besar: request/response `approve-workflow`, `audit-logs`, `graph/query`, field `mode` analyze-trend, dan matriks rate-limit POST-only diperbaiki ke model aktual
+- `middleware/ratelimit` — state kini SQLite bersama (WAL + `BEGIN IMMEDIATE`, `RATELIMIT_DB` default `~/.chroma/ratelimit.db`): kuota dihitung benar lintas-worker uvicorn dan bertahan melintasi restart (brute-force window tidak reset); fallback deque per-proses bila DB gagal
+- `retrieval_feedback` — terverifikasi terisi via jalur pipeline nyata (12 pasal/run, `cited=true` saat LLM menyitasi pasal yang terverifikasi): boost histori kini punya data kerja
 - **Pin sitasi eksplisit + primat peraturan pasca-rerank** — UU+Pasal yang disebut di query disuntik ke kandidat dan di-pin di atas reranker (BM25 tidak mengindeks metadata → pasal sitasi bisa absen dari kandidat); query generik menempatkan chunk `yurisprudensi` di belakang peraturan/doktrin (UU otoritas primer, putusan persuasif) — menahan banjir 2.000 putusan tanpa menghilangkannya
 - **Yurisprudensi diperluas** — 8 → 2.000 putusan MA pidana teregistrasi (`hf://putusan`), ~117K chunk total
 

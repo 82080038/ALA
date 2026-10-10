@@ -560,6 +560,16 @@ docker compose up -d api \
   --scale api=1  # ganti CMD: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8
 ```
 
+> **Batasan multi-worker:** registry job pipeline (`app/activity.py`) dan
+> antrean ALCD progress bersifat in-memory per-proses — `GET
+> /analyze-trend/{id}` hanya menemukan job di worker yang menjalankannya.
+> Rate limiting sudah lintas-proses (SQLite `RATELIMIT_DB`, default
+> `~/.chroma/ratelimit.db`) sehingga kuota tetap dihitung benar di semua
+> worker, dan job yang selesai tetap bisa dipulihkan dari audit log.
+> Untuk deployment produksi multi-worker penuh, gunakan sticky session
+> atau migrasikan registry job ke Postgres/Redis. Audit hash-chain aman
+> di semua worker (advisory lock Postgres).
+
 ### 8.2 Database Scaling
 
 | Database | Strategy |
