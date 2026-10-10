@@ -666,12 +666,15 @@ export default function BrainPage() {
       ctx.fillStyle = "#020204";
       ctx.fillRect(0, 0, w, h);
 
-      const px = (n: Neuron) => w * 0.5 + (n.x - cam.cx) * cam.z * w;
-      const py = (n: Neuron) => h * 0.5 + (n.y - cam.cy) * cam.z * h;
+      const px = (n: { x: number; y: number }) =>
+        w * 0.5 + (n.x - cam.cx) * cam.z * w;
+      const py = (n: { x: number; y: number }) =>
+        h * 0.5 + (n.y - cam.cy) * cam.z * h;
 
       /* Titik kontrol bezier — sinaps melengkung organik (bukan garis
          lurus); flip bergantian agar kurva tidak searah */
-      const curveCP = (a: Neuron, b: Neuron) => {
+      const curveCP = (
+        a: { x: number; y: number }, b: { x: number; y: number }) => {
         const ax = px(a), ay = py(a), bx = px(b), by = py(b);
         const mx = (ax + bx) / 2, my = (ay + by) / 2;
         const dx = bx - ax, dy = by - ay;
@@ -690,7 +693,31 @@ export default function BrainPage() {
         ctx.fill();
       }
 
-      /* Sinaps — dua lapis: glow lebar redup + inti tipis terang */
+      /* Partisi korpus terhubung vs terisolasi: wilayah ontologi tanpa
+         relasi rujukan pasal (absen dari links) direlokasi ke "pulau"
+         di kanan-bawah — otak hanya menampung pengetahuan yang
+         terhubung ke jaringan pasal. Dokumen yatim (unassigned_laws →
+         node ≥ MAX_REGIONS) tidak punya neuron sama sekali; dihitung
+         di label pulau. Bila links kosong (Neo4j down) semua dianggap
+         terhubung — jangan hukum data yang hilang. */
+      const linksAll = statsRef.current.links;
+      const linkedRegions = new Set<number>();
+      for (const l of linksAll) {
+        linkedRegions.add(l.fr);
+        linkedRegions.add(l.tr);
+      }
+      const hasLinks = linksAll.length > 0;
+      const isIsolated = (i: number) =>
+        hasLinks && !linkedRegions.has(NEURONS[i].region);
+      const isoPos = (i: number) => ({
+        x: 0.7 + ((((i * 2654435761) >>> 0) % 1000) / 1000) * 0.23,
+        y: 0.8 + ((((i * 40503) >>> 0) % 1000) / 1000) * 0.13,
+      });
+      const npos = (i: number) => (isIsolated(i) ? isoPos(i) : NEURONS[i]);
+
+      /* Sinaps — dua lapis: glow lebar redup + inti tipis terang.
+         Edge lintas partisi tidak digambar (garis membentang ke pulau
+         hanya noise); edge sesama pulau lebih redup. */
       for (let i = 0; i < active; i++) {
         const n = NEURONS[i];
         const hue = REGION_HUES[n.region];
@@ -699,15 +726,18 @@ export default function BrainPage() {
           0.05 + 0.14 * brightness + 0.1 * Math.min(1, regionScore);
         for (const j of n.edges) {
           if (j >= active || j <= i) continue;
-          const m = NEURONS[j];
-          const cp = curveCP(n, m);
+          const iso = isIsolated(i);
+          if (iso !== isIsolated(j)) continue;
+          const a2 = npos(i), m = npos(j);
+          const cp = curveCP(a2, m);
+          const fade = iso ? 0.4 : 1;
           ctx.beginPath();
-          ctx.moveTo(px(n), py(n));
+          ctx.moveTo(px(a2), py(a2));
           ctx.quadraticCurveTo(cp.x, cp.y, px(m), py(m));
-          ctx.strokeStyle = `hsla(${hue},75%,55%,${alpha * 0.35})`;
+          ctx.strokeStyle = `hsla(${hue},75%,55%,${alpha * 0.35 * fade})`;
           ctx.lineWidth = 2.4;
           ctx.stroke();
-          ctx.strokeStyle = `hsla(${hue},70%,60%,${alpha})`;
+          ctx.strokeStyle = `hsla(${hue},70%,60%,${alpha * fade})`;
           ctx.lineWidth = 0.6;
           ctx.stroke();
         }
@@ -762,24 +792,30 @@ export default function BrainPage() {
         ctx.setLineDash([]);
       }
 
-      /* Neuron — menyala sebentar saat paket pengetahuan terkirim ke sana */
+      /* Neuron — menyala sebentar saat paket pengetahuan terkirim ke
+         sana. Neuron pulau terisolasi dirender di posisi pulau dan
+         lebih redup. */
       for (let i = 0; i < active; i++) {
         const n = NEURONS[i];
         const hue = REGION_HUES[n.region];
         const fl = flashes.get(i);
         const boost = fl ? Math.max(0, 1 - (time - fl) / 600) : 0;
+        const dim = isIsolated(i) ? 0.4 : 1;
         const glow =
-          0.35 + 0.4 * brightness + 0.25 * Math.sin(time / 900 + i) +
-          0.6 * boost;
-        ctx.fillStyle = `hsla(${hue},75%,62%,${Math.max(0.12, glow)})`;
+          (0.35 + 0.4 * brightness + 0.25 * Math.sin(time / 900 + i) +
+            0.6 * boost) * dim;
+        const p = npos(i);
+        ctx.fillStyle = `hsla(${hue},75%,62%,${Math.max(0.08, glow)})`;
         ctx.beginPath();
-        ctx.arc(px(n), py(n), i % 17 === 0 ? 2.2 : 1.4, 0, Math.PI * 2);
+        ctx.arc(px(p), py(p), i % 17 === 0 ? 2.2 : 1.4, 0, Math.PI * 2);
         ctx.fill();
       }
 
-      /* Label wilayah ontologi di centroid tiap region aktif */
+      /* Label wilayah ontologi di centroid tiap region aktif —
+         neuron pulau dilewati agar centroid tidak ikut pindah */
       const cent: Record<number, { x: number; y: number; c: number }> = {};
       for (let i = 0; i < active; i++) {
+        if (isIsolated(i)) continue;
         const n = NEURONS[i];
         const c = cent[n.region] ?? (cent[n.region] = { x: 0, y: 0, c: 0 });
         c.x += n.x; c.y += n.y; c.c++;
@@ -830,8 +866,36 @@ export default function BrainPage() {
         ctx.font = "7px ui-monospace, monospace";
         for (let i = 0; i < active; i += step) {
           const n = NEURONS[i];
+          const p = npos(i);
           ctx.fillStyle = `hsla(${REGION_HUES[n.region]},60%,65%,${la * 0.5})`;
-          ctx.fillText(artOf(n.region, i), px(n) + 5, py(n) - 4);
+          ctx.fillText(artOf(n.region, i), px(p) + 5, py(p) - 4);
+        }
+      }
+
+      /* Label pulau — jumlah neuron terisolasi + dokumen yatim
+         (unassigned_laws tak punya wilayah/neuron) dihitung jujur */
+      if (hasLinks) {
+        let isoCount = 0;
+        for (let i = 0; i < active; i++) if (isIsolated(i)) isoCount++;
+        const orphans = nodes
+          .slice(MAX_REGIONS)
+          .reduce((k, nd) => k + (nd.laws?.length ?? 0), 0);
+        if (isoCount || orphans) {
+          const ax = px({ x: 0.815, y: 0.955 });
+          const ay = py({ x: 0.815, y: 0.955 });
+          ctx.textAlign = "center";
+          ctx.font = "600 8px ui-monospace, monospace";
+          ctx.fillStyle = "hsla(0,0%,70%,0.8)";
+          ctx.fillText(
+            `◈ KORPUS TERISOLASI — ${isoCount} neuron · wilayah tanpa rujukan`,
+            ax, ay);
+          if (orphans) {
+            ctx.font = "7px ui-monospace, monospace";
+            ctx.fillStyle = "hsla(0,0%,65%,0.6)";
+            ctx.fillText(
+              `+${orphans} dokumen belum terpetakan (unassigned)`,
+              ax, ay + 10);
+          }
         }
       }
 
@@ -847,7 +911,7 @@ export default function BrainPage() {
         const T = NEURONS[target];
         let best: number | null = null, bd = Infinity;
         for (const j of NEURONS[i].edges) {
-          if (j >= active) continue;
+          if (j >= active || isIsolated(j)) continue;
           const d = Math.hypot(NEURONS[j].x - T.x, NEURONS[j].y - T.y);
           if (d < bd) { bd = d; best = j; }
         }
@@ -875,7 +939,7 @@ export default function BrainPage() {
           const target =
             focusPool[Math.floor(Math.random() * focusPool.length)];
           const from = Math.floor(Math.random() * active);
-          if (from === target) continue;
+          if (from === target || isIsolated(from)) continue;
           const to = bestHop(from, target);
           if (to == null) continue;
           pulses.push({
@@ -892,12 +956,13 @@ export default function BrainPage() {
           });
           continue;
         }
-        /* Ambient — random walk saat idle */
+        /* Ambient — random walk saat idle, hanya di graf terhubung */
         const from = Math.floor(Math.random() * active);
+        if (isIsolated(from)) continue;
         const to = NEURONS[from].edges[
           Math.floor(Math.random() * NEURONS[from].edges.length)
         ];
-        if (to < active) {
+        if (to < active && !isIsolated(to)) {
           const arts = nodes[NEURONS[from].region]?.articles;
           pulses.push({
             from, to, t: 0,
@@ -928,7 +993,7 @@ export default function BrainPage() {
             : NEURONS[p.to].edges[
                 Math.floor(Math.random() * NEURONS[p.to].edges.length)
               ];
-          if (next != null && next < active) {
+          if (next != null && next < active && !isIsolated(next)) {
             p.from = p.to;
             p.to = next;
             p.t = 0;
