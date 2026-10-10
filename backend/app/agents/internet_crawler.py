@@ -143,6 +143,9 @@ def _google_news_search(query: str) -> list[dict]:
         return []
 
 
+_MAX_HTML_BYTES = 1_500_000  # ~1,5MB — halaman raksasa di-truncate
+
+
 async def _fetch_page_playwright(url: str) -> str | None:
     """Fetch halaman via Playwright headless (untuk situs JS-heavy)."""
     try:
@@ -161,7 +164,12 @@ async def _fetch_page_playwright(url: str) -> str | None:
                     url, wait_until="domcontentloaded",
                     timeout=_TIMEOUT * 1000,
                 )
-                return await page.content()
+                # Redirect bisa membawa ke domain terlarang — cek URL final,
+                # bukan hanya URL kandidat.
+                if not _is_allowed_domain(page.url):
+                    return None
+                html = await page.content()
+                return html[:_MAX_HTML_BYTES]
             finally:
                 await browser.close()
     except Exception as exc:
@@ -187,14 +195,29 @@ def _fetch_page_sync(url: str) -> str | None:
 
 
 def _fetch_page_http(url: str) -> str | None:
-    """Fetch halaman via httpx (fallback cepat untuk situs statis)."""
+    """Fetch halaman via httpx (fallback cepat untuk situs statis).
+
+    Streaming dengan batas ukuran — respons raksasa tidak dimuat penuh
+    ke memori. URL final dicek ulang: redirect (mis. tautan RSS) bisa
+    mengarah ke domain terlarang walau URL kandidat bersih.
+    """
     try:
-        resp = httpx.get(url, headers={"User-Agent": _UA},
-                         timeout=_TIMEOUT, follow_redirects=True)
-        if resp.status_code == 200 and "text/html" in resp.headers.get(
-            "content-type", ""
-        ):
-            return resp.text
+        with httpx.stream(
+            "GET", url, headers={"User-Agent": _UA},
+            timeout=_TIMEOUT, follow_redirects=True,
+        ) as resp:
+            if resp.status_code != 200 or "text/html" not in \
+                    resp.headers.get("content-type", ""):
+                return None
+            if not _is_allowed_domain(str(resp.url)):
+                return None
+            chunks, size = [], 0
+            for block in resp.iter_bytes(65536):
+                chunks.append(block)
+                size += len(block)
+                if size >= _MAX_HTML_BYTES:
+                    break
+        return b"".join(chunks).decode("utf-8", errors="replace")
     except Exception as exc:
         logger.debug("HTTP fetch gagal %s: %s", url, exc)
     return None

@@ -108,14 +108,16 @@ POST /api/v1/analyze-trend
 ```json
 {
   "query": "modus pencucian uang melalui cryptocurrency",
-  "case_id": null
+  "case_id": null,
+  "mode": "full"
 }
 ```
 
 | Field | Type | Required | Default | Deskripsi |
 |-------|------|----------|---------|-----------|
 | `query` | `string` | ✅ | — | Query analisis dalam Bahasa Indonesia (3–4000 char) |
-| `case_id` | `string (uuid)` | ❌ | `null` | Kaitkan hasil ke kasus tertentu |
+| `case_id` | `string (uuid)` | ❌ | `null` | Kaitkan hasil ke kasus tertentu (divalidasi: 400 UUID rusak, 404 kasus tidak ada/milik tenant lain) |
+| `mode` | `string` | ❌ | `"full"` | `full` = 4 agen (crawler + codegen); `legal` = hanya retrieval pasal (cepat) |
 
 **Response `202 Accepted`:**
 ```json
@@ -288,7 +290,10 @@ GET /api/v1/cases/{case_id}
   "id": "uuid-v4",
   "title": "Kasus TPPU via Cryptocurrency",
   "description": "...",
-  "status": "in_progress",
+  "status": "open",
+  "case_number": "LP-2024-001",
+  "crime_type": "pencucian_uang",
+  "priority": "high",
   "assigned_to": {
     "name": "Budi Santoso",
     "badge_number": "APH-2024-001",
@@ -297,15 +302,17 @@ GET /api/v1/cases/{case_id}
   "analysis_history": [
     {
       "audit_id": "uuid-v4",
+      "request_id": "uuid-v4",
       "query": "metode phishing APK terbaru",
-      "timestamp": "2026-10-05T15:30:00Z",
-      "status": "approved"
+      "timestamp": "2026-10-05T15:30:00Z"
     }
   ],
   "created_at": "2026-09-01T10:00:00Z",
   "updated_at": "2026-10-05T15:30:00Z"
 }
 ```
+
+**Error:** `404` ID bukan UUID / kasus tidak ada / milik tenant lain (RLS — indistinguishable by design).
 
 ---
 
@@ -315,38 +322,33 @@ GET /api/v1/cases/{case_id}
 GET /api/v1/audit-logs
 ```
 
-**Deskripsi:** Mengambil immutable audit log seluruh aktivitas AI dalam sistem.
+**Deskripsi:** Mengambil immutable audit log aktivitas AI milik tenant (super_admin: semua). Terbaru dulu.
 
 **Query Parameters:**
 
 | Parameter | Type | Default | Deskripsi |
 |-----------|------|---------|-----------|
-| `start_date` | `string (ISO 8601)` | — | Filter tanggal mulai |
-| `end_date` | `string (ISO 8601)` | — | Filter tanggal akhir |
-| `action` | `string` | `all` | Filter: `analyze`, `approve`, `reject`, `execute` |
-| `page` | `integer` | `1` | Halaman paginasi |
-| `per_page` | `integer` | `50` | Jumlah item per halaman |
+| `limit` | `integer` | `50` | Jumlah entri (maks 200) |
 
 **Response `200 OK`:**
 ```json
 {
-  "total": 156,
-  "page": 1,
-  "per_page": 50,
   "logs": [
     {
       "id": "uuid-v4",
       "timestamp": "2026-10-07T14:05:00Z",
-      "action": "approve",
-      "user_badge": "APH-2024-001",
+      "action": "analyze",
       "request_id": "uuid-v4",
-      "rationale": "Kode telah direview, aman untuk dieksekusi",
-      "code_generated": "import re\n...",
-      "execution_result": "success"
+      "query_input": "modus pencucian uang via crypto",
+      "evidence_sha256_before": null,
+      "evidence_sha256_after": null,
+      "entry_hash": "a736f577…"
     }
   ]
 }
 ```
+
+Lihat juga `GET /api/v1/audit-logs/verify` (super_admin) — verifikasi integritas hash-chain → `{valid, entries_checked, broken_at}`.
 
 ---
 
@@ -356,39 +358,25 @@ GET /api/v1/audit-logs
 POST /api/v1/graph/query
 ```
 
-**Deskripsi:** Menjalankan query terhadap graph database untuk melihat relasi antar entitas.
+**Deskripsi:** Menjalankan Cypher **baca-saja** terhadap graph Neo4j global. Keyword tulis (`CREATE`, `MERGE`, `DELETE`, `SET`, `DROP`, `CALL`, `LOAD`, `REMOVE`, `DETACH`) ditolak `400`; hasil dibatasi 500 record.
 
 **Request Body:**
 ```json
 {
-  "entity_type": "LegalArticle",
-  "entity_id": "UU_ITE_Pasal_30",
-  "relationship_types": ["CROSS_REFERENCES", "CONTRADICTS"],
-  "depth": 2
+  "cypher": "MATCH (a:LegalArticle)-[r]->(b:LegalArticle) WHERE a.article_number = $pasal RETURN a.law_name, type(r), b.law_name, b.article_number LIMIT 10",
+  "parameters": {"pasal": "30"}
 }
 ```
 
 **Response `200 OK`:**
 ```json
 {
-  "center_node": {
-    "label": "LegalArticle",
-    "properties": {
-      "law_name": "UU ITE",
-      "article_number": "Pasal 30",
-      "title": "Akses Ilegal"
-    }
-  },
-  "relationships": [
+  "records": [
     {
-      "type": "CROSS_REFERENCES",
-      "target": {
-        "label": "LegalArticle",
-        "properties": {
-          "law_name": "UU ITE",
-          "article_number": "Pasal 32"
-        }
-      }
+      "a.law_name": "UU ITE",
+      "type(r)": "CROSS_REFERENCES",
+      "b.law_name": "KUHP",
+      "b.article_number": "310"
     }
   ]
 }

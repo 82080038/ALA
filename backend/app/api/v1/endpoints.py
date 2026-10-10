@@ -327,6 +327,7 @@ async def _run_analysis_job(
 async def analyze_status(
     request_id: str,
     tenant: TenantContext = Depends(get_tenant),
+    db: Session = Depends(get_db),
 ):
     """Status job pipeline — tahap agen aktif + hasil jika selesai."""
     _require_auth(tenant)
@@ -335,9 +336,44 @@ async def analyze_status(
     # Scope tenant: job milik institusi lain → 404 (tidak bisa di-probe).
     scope = None if tenant.is_super_admin else str(_tenant_filter(tenant))
     job = activity.get_job(request_id, scope)
-    if not job:
+    if job:
+        return job
+
+    # Job registry volatil (hilang saat restart API) — pulihkan status
+    # dari audit log permanen agar hasil tetap bisa diambil pasca-restart.
+    try:
+        req_uuid = uuid.UUID(request_id)
+    except ValueError:
         raise HTTPException(404, "Job tidak ditemukan.")
-    return job
+    from app.models.operational import AiAuditLog
+    _tenant_db(tenant, db)
+    row = db.scalar(
+        select(AiAuditLog).where(
+            AiAuditLog.request_id == req_uuid,
+            AiAuditLog.action == "analyze",
+        ).limit(1)
+    )
+    if not row:
+        raise HTTPException(404, "Job tidak ditemukan.")
+    meta = row.metadata_ or {}
+    return {
+        "request_id": request_id,
+        "kind": "analyze",
+        "status": "done",
+        "recovered_from_audit": True,
+        "stage": None,
+        "stages_completed": ["alcd", "legal_foundation",
+                             "internet_crawler", "synthesis_developer"],
+        "finished_at": row.timestamp.isoformat() if row.timestamp else None,
+        "result": {
+            "request_id": request_id,
+            "legal_articles": row.legal_articles or [],
+            "crime_trend": row.crime_trend or {},
+            "code_generated": bool(row.code_generated),
+            "requires_approval": bool(row.code_generated),
+            "metadata": meta,
+        },
+    }
 
 
 @router.get("/activity")
@@ -488,6 +524,59 @@ async def create_case(
     db.commit()
     db.refresh(case)
     return {"id": str(case.id), "status": case.status}
+
+
+@router.get("/cases/{case_id}")
+async def case_detail(
+    case_id: str,
+    tenant: TenantContext = Depends(get_tenant),
+    db: Session = Depends(get_db),
+):
+    """Detail kasus + riwayat analisis yang tertaut (dari audit log)."""
+    _require_auth(tenant)
+    from app.models.operational import AiAuditLog, Case
+    from app.models.tenant import User
+
+    try:
+        c_uuid = uuid.UUID(case_id)
+    except ValueError:
+        raise HTTPException(404, "ID bukan UUID yang valid.")
+
+    _tenant_db(tenant, db)
+    case = db.get(Case, c_uuid)  # RLS: kasus tenant lain → None (404)
+    if not case:
+        raise HTTPException(404, "Kasus tidak ditemukan.")
+
+    assignee = db.get(User, case.assigned_to) if case.assigned_to else None
+    history = db.scalars(
+        select(AiAuditLog)
+        .where(AiAuditLog.case_id == c_uuid,
+               AiAuditLog.action == "analyze")
+        .order_by(AiAuditLog.timestamp.desc())
+        .limit(50)
+    ).all()
+    return {
+        "id": str(case.id),
+        "title": case.title,
+        "description": case.description,
+        "status": case.status,
+        "case_number": case.case_number,
+        "crime_type": case.crime_type,
+        "priority": case.priority,
+        "assigned_to": {
+            "name": assignee.name,
+            "badge_number": assignee.badge_number,
+            "role": assignee.role,
+        } if assignee else None,
+        "analysis_history": [{
+            "audit_id": str(a.id),
+            "request_id": str(a.request_id),
+            "query": (a.query_input or "")[:200],
+            "timestamp": a.timestamp.isoformat() if a.timestamp else None,
+        } for a in history],
+        "created_at": case.created_at.isoformat() if case.created_at else None,
+        "updated_at": case.updated_at.isoformat() if case.updated_at else None,
+    }
 
 
 # ---------------------------------------------------------------------------
