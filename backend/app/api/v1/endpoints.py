@@ -825,7 +825,10 @@ async def alcd_ontology(db: Session = Depends(get_db)):
         if not year:
             m2 = _re.search(r"Tahun\s+(\d{4})", r.law_name or "")
             year = m2.group(1) if m2 else ""
-        probe = {"law_subject": meta.get("law_subject") or "",
+        # law_name digabung ke subjek — bentuk peraturan (Perkap/PP/
+        # Perpres) hanya tampak di nama, bukan klausa TENTANG.
+        probe = {"law_subject": ((meta.get("law_subject") or "") + " " +
+                                 (r.law_name or "")).strip(),
                  "law_name": r.law_name or ""}
         placed = False
         # Doktrin & yurisprudensi hanya boleh menempati node hint-nya —
@@ -964,7 +967,17 @@ async def alcd_ontology(db: Session = Depends(get_db)):
                 "ta: b.article_number})[..3] AS items "
                 "UNWIND items AS it "
                 "RETURN fl, it.fa AS fa, tl, it.ta AS ta, "
-                "'CITES' AS rel LIMIT 250"
+                "'CITES' AS rel LIMIT 250 "
+                "UNION "
+                # Sitasi non-putusan (Perkap/PP/Peraturan → dasar hukum)
+                # jumlahnya kecil tapi justru penghubung wilayah
+                # minoritas — jangan sampai kalah sampling oleh ribuan
+                # edge putusan.
+                "MATCH (a:LegalArticle)-[r:CITES]->(b:LegalArticle) "
+                "WHERE NOT a.law_name STARTS WITH 'Putusan' "
+                "RETURN a.law_name AS fl, a.article_number AS fa, "
+                "b.law_name AS tl, b.article_number AS ta, "
+                "'LEGAL_BASIS' AS rel LIMIT 60"
             ):
                 fr = _region_of(rec["fl"], None)
                 tr = _region_of(rec["tl"], fr)
@@ -972,12 +985,16 @@ async def alcd_ontology(db: Session = Depends(get_db)):
                     links.append({"fr": fr, "fa": rec["fa"],
                                   "tr": tr, "ta": rec["ta"],
                                   "rel": rec["rel"]})
+            # Kuota per jenis — arm terakhir UNION tak boleh terpotong
+            # total; tetap batasi payload agar render ringan.
+            links = ([l for l in links if l["rel"] == "CITES"][:160] +
+                     [l for l in links if l["rel"] != "CITES"][:80])
         driver.close()
     except Exception as exc:
         logger.warning("alcd/ontology: baca Neo4j gagal: %s", exc)
 
     return {"nodes": nodes_out, "unassigned_laws": unassigned,
-            "links": links[:200]}
+            "links": links[:240]}
 
 
 @router.get("/alcd/progress")

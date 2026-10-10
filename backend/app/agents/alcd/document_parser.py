@@ -155,6 +155,19 @@ class DocumentParser:
         marks = self._struct_markers(text)
         matches = list(_PASAL_RE.finditer(text))
         articles = []
+        # Konsiderans (Menimbang/Mengingat/… sebelum Pasal 1) memuat
+        # dasar hukum dokumen — mis. Perkap "Mengingat: UU Nomor 2
+        # Tahun 2002". Tanpa ini referensi hirarkis terbuang.
+        if matches:
+            preamble = text[:matches[0].start()].strip()
+            if len(preamble) >= 200 and re.search(
+                    r"menimbang|mengingat|memutuskan", preamble,
+                    re.IGNORECASE):
+                articles.append({
+                    "article_number": "Konsiderans",
+                    "hierarchy": "Konsiderans",
+                    "content": preamble[:8000],
+                })
         seen: set[str] = set()
         for i, m in enumerate(matches):
             start = m.end()

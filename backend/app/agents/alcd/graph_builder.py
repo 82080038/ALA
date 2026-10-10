@@ -84,6 +84,15 @@ _CITE_ALIAS_RE = re.compile(
 )
 _ALIAS_LAW = {"KUHP": ("1", "1946"), "KUHAP": ("8", "1981")}
 
+# Dasar hukum utuh tanpa pasal — "Mengingat: Undang-Undang Nomor 2
+# Tahun 2002" pada konsiderans Perkap/Perja/Peraturan. Ditambatkan ke
+# Pasal 1 UU target (jangkar kanonik; edge = "dokumen menyitasi UU").
+_BARE_UU_RE = re.compile(
+    r"(?:UU|Undang[-\s]?Undang)(?:\s+RI)?\s+"
+    r"(?:No(?:mor)?\.?\s*)(\d+)\s+Tahun\s+(\d{4})",
+    re.IGNORECASE,
+)
+
 
 def build_law_name_map(db) -> dict:
     """Peta (nomor, tahun) → law_name kanonik registry — resolver untuk
@@ -138,6 +147,20 @@ def extract_putusan_citations(
                     "from_article": src,
                     "to_law": tgt,
                     "to_article": f"Pasal {m.group(1)}",
+                })
+        # Sitasi UU utuh (tanpa pasal) — dasar hukum/konsiderans.
+        cited_spans = [m.span() for m in _CITE_UU_RE.finditer(content)]
+        cited_laws = {r["to_law"] for r in refs if r["from_article"] == src}
+        for m in _BARE_UU_RE.finditer(content):
+            if any(s <= m.start() < e for s, e in cited_spans):
+                continue  # bagian dari sitasi ber-pasal
+            tgt = law_map.get((m.group(1).lstrip("0"), m.group(2)))
+            if tgt and tgt not in cited_laws:
+                cited_laws.add(tgt)
+                refs.append({
+                    "from_article": src,
+                    "to_law": tgt,
+                    "to_article": "Pasal 1",
                 })
     seen, unique = set(), []
     for r in refs:

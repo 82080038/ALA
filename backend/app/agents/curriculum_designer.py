@@ -213,9 +213,20 @@ def _subject_match(node_topic: str, title: str, parsed: dict) -> bool:
         node_words = _topic_keywords(canonical)
         disc = _DISCRIMINATORS.get(key, set())
         return _covers(node_words) and all(w in probe for w in disc)
-    node_words = _topic_keywords(node_topic)
+    # '/' pada topik adalah ALTERNATIF ("perkap/perja" cocok untuk
+    # dokumen Perkap saja ATAU Perja saja) — tanpa ini sebuah Perkap
+    # murni mustahil memenuhi kedua kata sekaligus.
+    alt_groups = [_topic_keywords(t) for t in node_topic.split("/")]
+    if any(_covers(g) for g in alt_groups if g):
+        return True
+    # Sinonim bentuk peraturan untuk topik Perkap/Perja — teks resmi
+    # menulis "Peraturan Kepolisian Negara RI", bukan singkatan.
+    if key == "perkap/perja" and (
+            "peraturan kepolisian" in probe or "peraturan polri" in probe):
+        return True
     # Node generik: subjek cocok node ATAU judul rencana kurikulum.
-    return _covers(node_words) or _covers(_topic_keywords(title))
+    return _covers(_topic_keywords(node_topic)) or _covers(
+        _topic_keywords(title))
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +436,10 @@ _EXPECTED_LAW_IDS: dict[str, set[tuple[str, str]]] = {
     "uu tpks": {("12", "2022")},
     "uu perlindungan anak": {("23", "2002"), ("35", "2014"),
                               ("17", "2016")},
+    # UU organik kelembagaan APH — dasar hierarkis seluruh Perkap/Perja.
+    "uu kelembagaan aph": {("2", "2002"), ("16", "2004"),
+                            ("11", "2021"), ("30", "2002"),
+                            ("48", "2009")},
 }
 
 
