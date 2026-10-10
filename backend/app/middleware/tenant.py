@@ -100,6 +100,10 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
                 )
                 if tenant.user_role not in _ALLOWED_ROLES:
                     raise ValueError("role")
+                # Klaim tier divalidasi sama ketatnya dengan jalur header
+                # dev — klaim arbitrer (token lama/bug) tidak boleh lolos.
+                if tenant.tier_level not in _ALLOWED_TIERS:
+                    raise ValueError("tier")
                 request.state.tenant = tenant
                 return await call_next(request)
             except (ValueError, KeyError):

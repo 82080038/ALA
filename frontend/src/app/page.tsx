@@ -124,14 +124,21 @@ function buildNeurons(): Neuron[] {
     };
   });
   neurons.sort((a, b) => a.order - b.order);
-  // 3 tetangga terdekat sebagai sinaps
+  // 3 tetangga terdekat sebagai sinaps — SIMETRIS: bila i menunjuk j,
+  // j juga menunjuk i. Tanpa ini neuron bisa terisolasi visual: edge
+  // hanya digambar indeks-rendah→tinggi, jadi neuron yang seluruh
+  // tetangganya berindeks lebih kecil dan tak ditunjuk balik tampil
+  // sebagai titik terputus.
   for (let i = 0; i < neurons.length; i++) {
     const dist = neurons
       .map((n, j) => ({ j, d: Math.hypot(n.x - neurons[i].x, n.y - neurons[i].y) }))
       .filter((o) => o.j !== i)
       .sort((a, b) => a.d - b.d)
       .slice(0, 3);
-    neurons[i].edges = dist.map((o) => o.j);
+    for (const o of dist) {
+      if (!neurons[i].edges.includes(o.j)) neurons[i].edges.push(o.j);
+      if (!neurons[o.j].edges.includes(i)) neurons[o.j].edges.push(i);
+    }
   }
   return neurons;
 }
@@ -286,6 +293,8 @@ export default function BrainPage() {
   }>({ recent: [], queue: [], sedang: null });
   const [focusLabel, setFocusLabel] = useState("inti");
   const focusRef = useRef("inti"); // ditulis loop kanvas tiap frame
+  const [camReason, setCamReason] = useState("gambaran umum otak");
+  const reasonRef = useRef("gambaran umum otak"); // alasan gerak kamera
   const wrapRef = useRef<HTMLDivElement>(null);
   const [isFs, setIsFs] = useState(false);
 
@@ -475,6 +484,7 @@ export default function BrainPage() {
     }
     const id = setInterval(() => {
       setFocusLabel(focusRef.current);
+      setCamReason(reasonRef.current);
       if (progRef.current.running) return; // biarkan event nyata bicara
       let i = Math.floor(Math.random() * AMBIENT.length);
       if (i === ambientIdx.current) i = (i + 1) % AMBIENT.length;
@@ -507,7 +517,8 @@ export default function BrainPage() {
     let focusRegion = -1;
     let focusNeuron = -1;
     let deepDive = false;
-    let focusSwitch = 0;
+    let focusSwitch = -20000; // mulai di tengah jeda — patroli pertama cepat
+    let patrolIdx = -1;
     let prevChunks = 0;
     let activity = 0;
     /* prefers-reduced-motion: kamera tetap utuh, tanpa menyelam */
@@ -548,27 +559,35 @@ export default function BrainPage() {
       prevChunks = chunks;
       const busy = grown > 0 ? 1 : s && !s.knowledge_ready ? 0.55 : 0.15;
       activity += (busy - activity) * 0.02;
-      if (!prog.running && time - focusSwitch > 6000) {
-        focusSwitch = time;
-        deepDive = !deepDive; // survey wilayah ↔ menyelam ke neuron
-        let best = 0, bestW = -1;
-        for (let r = 0; r < MAX_REGIONS; r++) {
-          const wr = (nodes[r]?.knowledge_score ?? 0) + Math.random() * 0.35;
-          if (wr > bestW) { bestW = wr; best = r; }
-        }
-        focusRegion = best;
-        focusRef.current =
-          nodes[focusRegion]?.subcategory ?? `wilayah ${focusRegion + 1}`;
-        // Target menyelam: neuron acak di wilayah fokus
+      /* Patroli idle — bukan zoom acak. Tiap ~14 dtk kamera meninjau
+         SEKILAS (~5 dtk, 1.35×) wilayah terkaya berikutnya secara
+         bergiliran, lalu kembali ke gambaran umum. Menyelam dalam
+         hanya untuk kerja nyata (prog.running di bawah). Alasan
+         selalu tertulis di HUD agar gerakan tidak tampak sembarang. */
+      const dwellMs = 5000;
+      if (!prog.running) {
+        deepDive = false;
         focusNeuron = -1;
-        if (deepDive) {
-          const pool: number[] = [];
-          for (let i = 0; i < active; i++)
-            if (NEURONS[i].region === focusRegion) pool.push(i);
-          if (pool.length)
-            focusNeuron = pool[Math.floor(Math.random() * pool.length)];
+        if (time - focusSwitch > 14000) {
+          focusSwitch = time;
+          const scored = nodes
+            .map((n, i) => ({ i, s: n?.knowledge_score ?? 0 }))
+            .filter((o) => o.i < MAX_REGIONS)
+            .sort((a, b) => b.s - a.s);
+          if (scored.length) {
+            patrolIdx = (patrolIdx + 1) % scored.length;
+            focusRegion = scored[patrolIdx].i;
+            focusRef.current =
+              nodes[focusRegion]?.subcategory ??
+              `wilayah ${focusRegion + 1}`;
+          }
         }
       }
+      reasonRef.current = prog.running
+        ? `mengikuti kerja: ${prog.stage ?? ""} · ${prog.topic ?? ""}`
+        : time - focusSwitch < dwellMs
+          ? "patroli wilayah berkala"
+          : "gambaran umum otak";
       if (prog.running && prog.topic) {
         const tq = (prog.topic || "").toUpperCase();
         /* Resolver wilayah: exact → containment dua arah → alias semantik
@@ -633,8 +652,13 @@ export default function BrainPage() {
       ty = Math.min(Math.max(ty, 0.18), 0.82);
       const zT = reduceMotion
         ? 1
-        : 1 +
-          activity * (deepDive ? 2.1 : 0.8) * (s?.knowledge_ready ? 0.55 : 1);
+        : prog.running
+          ? 1 +
+            activity * (deepDive ? 2.1 : 0.8) *
+              (s?.knowledge_ready ? 0.55 : 1)
+          : time - focusSwitch < dwellMs && focusRegion >= 0
+            ? 1.35 // patroli sekilas — cukup untuk membaca label wilayah
+            : 1;
       cam.z += (zT - cam.z) * 0.015;
       cam.cx += (tx - cam.cx) * 0.015;
       cam.cy += (ty - cam.cy) * 0.015;
@@ -1044,6 +1068,9 @@ export default function BrainPage() {
           <span className="text-glow-dim text-emerald-300/75">
             {focusLabel.toUpperCase()}
           </span>
+        </div>
+        <div className="text-[9px] text-emerald-200/20">
+          kamera: {camReason}
         </div>
 
         {/* Feed hidup — sedang diproses / baru dimiliki / rencana */}

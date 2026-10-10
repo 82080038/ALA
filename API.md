@@ -200,46 +200,42 @@ GET /api/v1/institutions
 POST /api/v1/approve-workflow
 ```
 
-**Deskripsi:** Mencatat persetujuan APH untuk mengeksekusi kode yang digenerate AI. Approval dicatat dalam audit log immutable.
+**Deskripsi:** Mencatat keputusan APH (human-in-the-loop). `approved=true` → kode hasil generate di-scan ulang guardrail lalu dieksekusi di sandbox Docker terkunci; `approved=false` → ditolak. Keputusan dicatat dalam audit log hash-chained. **Satu request hanya boleh diputuskan sekali** — approve ganda atau approve-setelah-reject ditolak `409`.
 
 **Request Body:**
 ```json
 {
   "request_id": "uuid-v4",
-  "action": "approve",
-  "approver_badge_number": "APH-2024-001",
-  "notes": "Kode telah direview, aman untuk dieksekusi"
+  "approved": true,
+  "approved_by": "APH-2024-001"
 }
 ```
 
 | Field | Type | Required | Deskripsi |
 |-------|------|----------|-----------|
-| `request_id` | `string (uuid)` | ✅ | ID request dari `/api/analyze-trend` |
-| `action` | `string` | ✅ | `approve` atau `reject` |
-| `approver_badge_number` | `string` | ✅ | Nomor badge APH yang memberikan approval |
-| `notes` | `string` | ❌ | Catatan tambahan dari approver |
+| `request_id` | `string (uuid)` | ✅ | ID request dari `/api/v1/analyze-trend` |
+| `approved` | `boolean` | ✅ | `true` = eksekusi sandbox; `false` = tolak |
+| `approved_by` | `string` | ❌ | Identitas approver (dicatat di metadata audit) |
 
 **Response `200 OK` (approve):**
 ```json
 {
-  "status": "approved",
-  "audit_id": "uuid-v4",
-  "execution_result": {
-    "status": "success",
-    "output": "Analyzed 1,247 transactions. Found 23 suspicious patterns.",
-    "execution_time_ms": 1250
-  }
+  "request_id": "uuid-v4",
+  "status": "executed",
+  "exit_code": 0,
+  "timed_out": false,
+  "guardrail_violations": [],
+  "stdout": "...",
+  "stderr": ""
 }
 ```
 
 **Response `200 OK` (reject):**
 ```json
-{
-  "status": "rejected",
-  "audit_id": "uuid-v4",
-  "message": "Workflow rejected by approver"
-}
+{ "request_id": "uuid-v4", "status": "rejected" }
 ```
+
+**Error:** `400` request_id bukan UUID / tidak ada kode · `404` request tidak ditemukan (termasuk milik tenant lain — RLS) · `409` request sudah diputuskan (`execute`/`reject`)
 
 ---
 
@@ -606,14 +602,14 @@ Semua endpoint menggunakan format error standar:
 
 ## Rate Limiting
 
-Diterapkan di `app/middleware/ratelimit.py` — sliding window in-memory per (IP, endpoint). Respons `429` + header `Retry-After`.
+Diterapkan di `app/middleware/ratelimit.py` — sliding window in-memory per (IP, method+endpoint). Hanya request `POST` yang dibatasi — `GET /analyze-trend/{id}` adalah poller status dan tidak menghabiskan kuota. Respons `429` + header `Retry-After`.
 
 | Endpoint | Limit |
 |----------|-------|
-| `/api/v1/auth/login` | 10 / menit / IP (anti brute-force) |
-| `/api/v1/analyze-trend` | 10 / menit / IP |
-| `/api/v1/approve-workflow` | 20 / menit / IP |
-| `/api/v1/alcd/trigger` | 3 / 5 menit / IP |
+| `POST /api/v1/auth/login` | 10 / menit / IP (anti brute-force) |
+| `POST /api/v1/analyze-trend` | 10 / menit / IP |
+| `POST /api/v1/approve-workflow` | 20 / menit / IP |
+| `POST /api/v1/alcd/trigger` | 3 / 5 menit / IP |
 
 Endpoint lain saat ini tidak dibatasi (lokal standalone). Tambahkan aturan di `_RULES` bila dibutuhkan; untuk multi-node ganti penyimpanan ke Redis.
 

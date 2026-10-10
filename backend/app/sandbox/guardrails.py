@@ -73,6 +73,15 @@ _BLOCKED_CALLS: frozenset[str] = frozenset({
     "input", "breakpoint",  # interaktivitas — hang di sandbox
 })
 
+# Nama method yang setara dengan open(mode tulis) — open('w') diblok,
+# jadi jalur tulis alternatif ini juga diblok demi konsistensi lapis
+# guardrail (sandbox ro-FS tetap pertahanan terakhir).
+_BLOCKED_METHOD_NAMES: frozenset[str] = frozenset({
+    "write_text", "write_bytes", "mkdir", "unlink", "rename",
+    "replace", "touch", "rmdir", "symlink_to", "hardlink_to",
+    "chmod", "chown",
+})
+
 _BLOCKED_ATTR_ROOTS: frozenset[str] = frozenset({
     "os", "subprocess", "socket", "requests", "urllib", "httpx",
     "ftplib", "telnetlib", "smtplib", "poplib", "imaplib",
@@ -188,6 +197,12 @@ def _check_calls(tree: ast.Module, result: GuardrailResult) -> None:
             if name in _BLOCKED_CALLS:
                 result.violations.append(
                     f"Pemanggilan '{name}()' dilarang (baris {node.lineno})"
+                )
+            elif isinstance(func, ast.Attribute) and \
+                    func.attr in _BLOCKED_METHOD_NAMES:
+                result.violations.append(
+                    f"Method tulis '.{func.attr}()' dilarang — hanya "
+                    f"mode baca diizinkan (baris {node.lineno})"
                 )
             elif name == "open":
                 _check_open_mode(node, result)

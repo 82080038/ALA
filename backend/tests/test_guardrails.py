@@ -67,6 +67,23 @@ def test_syntax_error_reported():
     assert not r.allowed
 
 
+def test_path_write_methods_blocked():
+    """Path.write_text dkk. adalah open('w') terselubung — harus ditolak."""
+    for code in [
+        "from pathlib import Path\nPath('o.txt').write_text('x')",
+        "from pathlib import Path\np = Path('d')\np.mkdir()",
+        "from pathlib import Path\nPath('a').unlink()",
+    ]:
+        r = scan_code(code)
+        assert not r.allowed, f"seharusnya ditolak: {code}"
+
+
+def test_path_read_methods_allowed():
+    r = scan_code(
+        "from pathlib import Path\nprint(Path('d.txt').read_text())")
+    assert r.allowed, r.summary
+
+
 def test_custody_scaffold_passes():
     """Scaffold chain-of-custody (read-only + SHA-256) wajib lolos scan."""
     from app.agents.code_generator import CUSTODY_SCAFFOLD

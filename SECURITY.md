@@ -46,7 +46,7 @@ ALA menerapkan pendekatan **Defense in Depth** dengan beberapa lapisan keamanan:
 
 ### 2.1a Rate Limiting & Audit Integrity
 
-- `app/middleware/ratelimit.py`: sliding window per-IP pada `/auth/login` (10/mnt), `/analyze-trend` (10/mnt), `/approve-workflow` (20/mnt), `/alcd/trigger` (3/5mnt) — in-memory, zero-cost
+- `app/middleware/ratelimit.py`: sliding window per-IP pada `POST /auth/login` (10/mnt), `POST /analyze-trend` (10/mnt), `POST /approve-workflow` (20/mnt), `POST /alcd/trigger` (3/5mnt) — in-memory, zero-cost; hanya POST yang dibatasi (poller GET status tidak menghabiskan kuota)
 - `app/audit.py`: **hash-chain tamper-evident** — tiap baris `ai_audit_logs` membawa `prev_hash` + `entry_hash` (SHA-256); manipulasi/penghapusan baris memutus rantai, terdeteksi via `GET /api/v1/audit-logs/verify` (super_admin). Dikombinasikan dengan `REVOKE UPDATE/DELETE` DB-level → append-only + terdeteksi
 
 ### 2.2 Role-Based Access Control (RBAC)

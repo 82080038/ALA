@@ -12,12 +12,14 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-# path-prefix → (maks request, jendela detik)
-_RULES: "list[tuple[str, int, int]]" = [
-    ("/api/v1/auth/login", 10, 60),
-    ("/api/v1/analyze-trend", 10, 60),
-    ("/api/v1/approve-workflow", 20, 60),
-    ("/api/v1/alcd/trigger", 3, 300),
+# (method, path-prefix) → (maks request, jendela detik).
+# Method dibatasi POST — GET /analyze-trend/{id} adalah poller status
+# (tiap beberapa detik) dan tidak boleh menghabiskan kuota job mahal.
+_RULES: "list[tuple[str, str, int, int]]" = [
+    ("POST", "/api/v1/auth/login", 10, 60),
+    ("POST", "/api/v1/analyze-trend", 10, 60),
+    ("POST", "/api/v1/approve-workflow", 20, 60),
+    ("POST", "/api/v1/alcd/trigger", 3, 300),
 ]
 
 _hits: "dict[tuple[str, str], deque]" = {}
@@ -29,10 +31,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: RequestResponseEndpoint
     ) -> Response:
         path = request.url.path
-        for prefix, limit, window in _RULES:
-            if path.startswith(prefix):
+        method = request.method
+        for rule_method, prefix, limit, window in _RULES:
+            if method == rule_method and path.startswith(prefix):
                 ip = request.client.host if request.client else "?"
-                key = (ip, prefix)
+                key = (ip, f"{rule_method}:{prefix}")
                 now = time.monotonic()
                 with _lock:
                     q = _hits.setdefault(key, deque())

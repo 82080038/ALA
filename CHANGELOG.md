@@ -27,6 +27,13 @@
 - `code_generator.py` — kode hasil model 3B lokal yang gagal `ast.parse` mendapat SATU repair-pass (error + kode dikirim balik ke coder; re-validasi + custody re-inject; `audit.repaired`) sebelum error graceful
 - `autonomous_ingestor.py` — `_MAX_CHUNKS_PER_ARTICLE=200` via `chunk_text(limit=)`: seksi patologis (transkrip fakta putusan ratusan halaman) berhenti dipotong di batas, tidak lagi mematerialisasi seluruh daftar chunk dari teks multi-MB (hang belasan menit per dokumen)
 - `legal_foundation._lexical_index` — fetch dua-tahap (ids per-halaman → dokumen per-batch 4K) memperbaiki `too many SQL variables` sqlite Chroma pada koleksi >~32K chunk
+- `endpoints.approve_workflow` — keputusan kini **idempotent**: `409` bila request sudah `execute`/`reject` — approve ganda tidak lagi mengeksekusi sandbox berulang, approve-setelah-reject tidak lagi membatalkan penolakan
+- `endpoints.analyze_trend` — `case_id` divalidasi di depan (400 UUID rusak; 404 case tak ada/milik tenant lain via RLS): sebelumnya UUID rusak membunuh insert audit log secara diam-diam di worker background
+- `middleware/ratelimit` — aturan kini per-method: `GET /analyze-trend/{id}` (poller status tiap beberapa detik) tidak lagi menghabiskan kuota POST 10/mnt → klien sah tidak kena 429 saat memantau job
+- `endpoints.alcd_ontology` — fetch pasal ChromaDB dipaginasi sampai habis + cache TTL 120s; sebelumnya `limit=20000` diam-diam memotong pasal dokumen di luar 20K chunk pertama (korpus kini ~117K)
+- `middleware/tenant` — klaim `tier` pada jalur Bearer JWT divalidasi ke `_ALLOWED_TIERS` sama seperti jalur header dev (sebelumnya klaim arbitrer lolos ke state pipeline)
+- `sandbox/guardrails` — `Path.write_text/write_bytes/mkdir/unlink/rename/…` diblok setara `open(mode tulis)` — jalur tulis terselubung via `pathlib` sebelumnya lolos scan AST
+- `frontend/page.tsx` — kamera idle kini patroli wilayah terkaya bergiliran + alasan selalu tertulis di HUD (bukan zoom acak); `buildNeurons` adjacency simetris — neuron tak lagi tampak terisolasi (edge searah + render sekali → titik tanpa sambungan)
 - **Pin sitasi eksplisit + primat peraturan pasca-rerank** — UU+Pasal yang disebut di query disuntik ke kandidat dan di-pin di atas reranker (BM25 tidak mengindeks metadata → pasal sitasi bisa absen dari kandidat); query generik menempatkan chunk `yurisprudensi` di belakang peraturan/doktrin (UU otoritas primer, putusan persuasif) — menahan banjir 2.000 putusan tanpa menghilangkannya
 - **Yurisprudensi diperluas** — 8 → 2.000 putusan MA pidana teregistrasi (`hf://putusan`), ~117K chunk total
 

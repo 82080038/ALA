@@ -204,7 +204,23 @@ async def analyze_trend(
         # ditolak policy RLS (chain-of-custody akan hilang diam-diam).
         raise HTTPException(400, "X-Institution-ID diperlukan.")
     from app import activity
+    from app.models.operational import Case
     from app.models.tenant import Institution
+
+    # Validasi case_id — UUID rusak akan membunuh insert audit log
+    # secara diam-diam di worker background (audit hilang tanpa jejak),
+    # dan case milik tenant lain tidak boleh tertaut ke audit institusi
+    # ini (RLS menyaring db.get → 404 indistinguishable dari tidak ada).
+    case_uuid = None
+    if body.case_id:
+        try:
+            case_uuid = uuid.UUID(body.case_id)
+        except ValueError:
+            raise HTTPException(400, "case_id bukan UUID valid.")
+        _tenant_db(tenant, db)
+        if not db.get(Case, case_uuid):
+            raise HTTPException(
+                404, "Case tidak ditemukan untuk institusi ini.")
 
     # Validasi institution eksis — FK ai_audit_logs.institution_id akan
     # menolak baris untuk tenant fiktif (audit hilang diam-diam).
@@ -221,12 +237,14 @@ async def analyze_trend(
         kind="analyze",
         mode=body.mode,
     )
-    _spawn(_run_analysis_job(job["request_id"], body, tenant))
+    _spawn(_run_analysis_job(
+        job["request_id"], body, tenant, case_uuid))
     return {"request_id": job["request_id"], "status": "queued"}
 
 
 async def _run_analysis_job(
-    job_id: str, body: AnalyzeRequest, tenant: TenantContext
+    job_id: str, body: AnalyzeRequest, tenant: TenantContext,
+    case_uuid: uuid.UUID | None,
 ) -> None:
     """Worker background: pipeline → audit log → registry job."""
     from app import activity
@@ -278,7 +296,7 @@ async def _run_analysis_job(
                 request_id=uuid.UUID(job_id),
                 action="analyze",
                 user_id=tenant.user_id,
-                case_id=uuid.UUID(body.case_id) if body.case_id else None,
+                case_id=case_uuid,
                 query_input=body.query,
                 action_taken="pipeline_4_agents",
                 crime_trend={"summary": state.get("crime_summary", ""),
@@ -362,6 +380,20 @@ async def approve_workflow(
         raise HTTPException(404, "Request tidak ditemukan.")
     if not audit_row.code_generated:
         raise HTTPException(400, "Tidak ada kode untuk dieksekusi.")
+
+    # Idempotensi keputusan: satu request hanya boleh diputuskan sekali.
+    # Tanpa ini, approve ganda mengeksekusi kode berkali-kali, dan
+    # reject→approve tetap mengeksekusi — keduanya melanggar jaminan
+    # human-in-the-loop sekali-jalan.
+    decided = db.scalar(
+        select(AiAuditLog.action).where(
+            AiAuditLog.request_id == req_uuid,
+            AiAuditLog.action.in_(["execute", "reject"]),
+        ).limit(1)
+    )
+    if decided:
+        raise HTTPException(
+            409, f"Request sudah diputuskan ({decided}).")
 
     if not body.approved:
         append_audit(
@@ -618,6 +650,52 @@ async def _run_alcd_job(job_id: str) -> None:
         db.close()
 
 
+# Cache pasal-per-UU dari ChromaDB — koleksi >100K chunk, fetch penuh
+# tiap ~5s per klien terlalu mahal. TTL pendek agar dokumen baru tetap
+# muncul cepat; paginasi wajib — coll.get(limit=N) saja diam-diam
+# memotong pasal untuk dokumen di luar N pertama.
+_ARTS_CACHE_TTL = 120  # detik
+_ARTS_PAGE = 20000
+_arts_cache: dict = {"ts": 0.0, "data": {}}
+
+
+def _chroma_articles_by_law() -> dict[str, list[str]]:
+    import time
+
+    global _arts_cache
+    now = time.monotonic()
+    if now - _arts_cache["ts"] < _ARTS_CACHE_TTL and _arts_cache["data"]:
+        return _arts_cache["data"]
+
+    arts_by_law: dict[str, list[str]] = {}
+    try:
+        from app.database.chroma import (
+            get_chroma_client,
+            get_laws_collection,
+        )
+
+        coll = get_laws_collection(get_chroma_client())
+        offset = 0
+        while True:
+            got = coll.get(
+                include=["metadatas"], limit=_ARTS_PAGE, offset=offset)
+            metas = got.get("metadatas") or []
+            for m in metas:
+                ln = m.get("law_name") or ""
+                an = m.get("article_number") or ""
+                if ln and an:
+                    lst = arts_by_law.setdefault(ln, [])
+                    if an not in lst:
+                        lst.append(an)
+            if len(metas) < _ARTS_PAGE:
+                break
+            offset += _ARTS_PAGE
+        _arts_cache = {"ts": now, "data": arts_by_law}
+    except Exception as exc:
+        logger.warning("alcd/ontology: baca Chroma gagal: %s", exc)
+    return arts_by_law
+
+
 @router.get("/alcd/ontology")
 async def alcd_ontology(db: Session = Depends(get_db)):
     """Pohon ontologi pengetahuan yang dirumuskan ALCD — GLOBAL.
@@ -645,23 +723,7 @@ async def alcd_ontology(db: Session = Depends(get_db)):
     ).all()
 
     # Pasal nyata per UU — dari metadata chunk di ChromaDB.
-    arts_by_law: dict[str, list[str]] = {}
-    try:
-        from app.database.chroma import (
-            get_chroma_client,
-            get_laws_collection,
-        )
-
-        coll = get_laws_collection(get_chroma_client())
-        got = coll.get(include=["metadatas"], limit=20000)
-        for m in got.get("metadatas") or []:
-            ln, an = m.get("law_name") or "", m.get("article_number") or ""
-            if ln and an:
-                lst = arts_by_law.setdefault(ln, [])
-                if an not in lst:
-                    lst.append(an)
-    except Exception as exc:
-        logger.warning("alcd/ontology: baca Chroma gagal: %s", exc)
+    arts_by_law = _chroma_articles_by_law()
 
     # Petakan UU → node: identitas kanonik (nomor+tahun) lebih dulu,
     # lalu kecocokan subjek (klausa TENTANG) dengan topik node.
